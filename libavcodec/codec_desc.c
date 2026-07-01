@@ -3865,6 +3865,12 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .name      = "anull",
         .long_name = NULL_IF_CONFIG_SMALL("Null audio codec"),
     },
+    {
+        .id        = AV_CODEC_ID_MYZIGH264,
+        .type      = AVMEDIA_TYPE_VIDEO,
+        .name      = "myzigh264",
+        .long_name = NULL_IF_CONFIG_SMALL("MyZigH264 (H.264/AVC)"),
+    },
 };
 
 static int descriptor_compare(const void *key, const void *member)
