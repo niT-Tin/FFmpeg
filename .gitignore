@@ -49,7 +49,6 @@
 /config_components.h
 /coverage.info
 /lcov/
-/src
 /mapfile
 /tools/python/__pycache__/
 /libavcodec/vulkan/*.c
