@@ -56,3 +56,5 @@
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+.zig-cache/
+zig-out/
