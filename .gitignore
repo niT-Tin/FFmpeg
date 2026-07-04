@@ -57,3 +57,7 @@
 !/.forgejo/
 .zig-cache/
 zig-out/
+.expect/
+.claude/
+.vscode/
+.idea/
