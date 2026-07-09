@@ -1,6 +1,9 @@
 const std = @import("std");
 const Io = std.Io;
 
+var g_h: ZigH264Context = undefined;
+var g_initialized: bool = false;
+
 const FFmpeg = @import("ffmpeg");
 
 const NALUnit = struct {
@@ -13,6 +16,17 @@ pub const NALError = error{
     NoStartCode,
     InvalidData,
     OutOfMemory,
+};
+
+pub const ZigH264Context = struct {
+    width: u32 = 0,
+    height: u32 = 0,
+    sps_list: std.ArrayList(Sps),
+    pps_list: std.ArrayList(Pps),
+    nals: std.ArrayList(NALUnit),
+    // nal data
+    raw_nal_buffer: std.ArrayList(u8),
+    read_pos: usize,
 };
 
 pub const NALSplitter = struct {
@@ -37,7 +51,7 @@ pub const NALSplitter = struct {
             }
             if (i + 2 < self.data.len and self.data[i] == 0 and self.data[i + 1] == 0 and self.data[i + 2] == 1) {
                 if (i + 3 >= self.data.len or self.data[i + 3] != 0) {
-                    return .{ .pos = i, .len = 4 };
+                    return .{ .pos = i, .len = 3 };
                 }
             }
             i += 1;
@@ -45,8 +59,9 @@ pub const NALSplitter = struct {
         return null;
     }
 
-    pub fn next(self: *NALSplitter) !?NALUnit {
-        const start_code = self.findStartCode(self.pos) orelse {
+    pub fn next(self: *NALSplitter, h: *ZigH264Context) !?NALUnit {
+        // std.debug.print("read_pos: {d}\n", .{h.read_pos});
+        const start_code = self.findStartCode(h.read_pos) orelse {
             return null;
         };
 
@@ -65,6 +80,7 @@ pub const NALSplitter = struct {
         const nal_type = @as(u5, @intCast(nalu_data[0] & 0x1F));
 
         self.pos = nalu_end;
+        h.read_pos = self.pos;
 
         return NALUnit{
             .data = nalu_data,
@@ -78,17 +94,17 @@ pub const NALSplitter = struct {
     }
 };
 
-pub fn extractAllNALUnits(allocator: std.mem.Allocator, data: []u8) ![]NALUnit {
-    var list = try std.ArrayList(NALUnit).initCapacity(allocator, 100);
-    defer list.deinit(allocator);
-
-    var splitter = NALSplitter.init(allocator, data);
-
-    while (try splitter.next()) |nal| {
-        try list.append(allocator, nal);
-    }
-    return try list.toOwnedSlice(allocator);
-}
+// pub fn extractAllNALUnits(allocator: std.mem.Allocator, data: []u8) ![]NALUnit {
+//     var list = try std.ArrayList(NALUnit).initCapacity(allocator, 100);
+//     defer list.deinit(allocator);
+//
+//     var splitter = NALSplitter.init(allocator, data);
+//
+//     while (try splitter.next()) |nal| {
+//         try list.append(allocator, nal);
+//     }
+//     return try list.toOwnedSlice(allocator);
+// }
 
 const Pps = struct {};
 const Sps = struct {};
@@ -107,16 +123,11 @@ const TypeError = error{
 //     };
 // }
 
-fn split_nals(data: []u8) ![]NALUnit {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
-
-    var splitter = NALSplitter.init(allocator, data);
+fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
+    var splitter = NALSplitter.init(allocator, h.raw_nal_buffer.items);
     var nal_count: usize = 0;
 
-    while (try splitter.next()) |nal| {
+    while (try splitter.next(h)) |nal| {
         nal_count += 1;
         const type_name = switch (nal.nal_type) {
             7 => "SPS",
@@ -131,10 +142,12 @@ fn split_nals(data: []u8) ![]NALUnit {
             else => "Unknown",
         };
         std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ nal_count, type_name, nal.data.len, nal.start_code_len });
+    } else {
+        return;
     }
     std.debug.print("共找到 {d} 个 NAL 单元\n", .{nal_count});
 
-    return TypeError.NotMaintainedType;
+    // return TypeError.NotMaintainedType;
 }
 
 fn remove_emulation_prevention(src: []u8) ![]u8 {
@@ -158,6 +171,27 @@ export fn my_zigh264(
     if (pkt == null or pkt.?.size == 0) {
         // return
     }
+    if (ctx.?.priv_data == null) {
+        const h = std.heap.c_allocator.create(ZigH264Context) catch {
+            return -1;
+        };
+        h.* = ZigH264Context{
+            .width = 0,
+            .height = 0,
+            .sps_list = .{ .items = &.{}, .capacity = 0 },
+            .pps_list = .{ .items = &.{}, .capacity = 0 },
+            .nals = std.ArrayList(NALUnit).initCapacity(std.heap.c_allocator, 10) catch |e| {
+                std.debug.print("{any}\n", .{e});
+                return -1;
+            },
+            .raw_nal_buffer = std.ArrayList(u8).initCapacity(std.heap.c_allocator, 100) catch |e| {
+                std.debug.print("{any}\n", .{e});
+                return -1;
+            },
+            .read_pos = 0,
+        };
+        ctx.?.priv_data = h;
+    }
     const p_ptr = pkt.?;
     // transfer the size from c_int to usize
 
@@ -166,20 +200,47 @@ export fn my_zigh264(
 
     if (data_size == 0) {
         // TODO: end of stream, output the remaining frames
+        return 0;
     }
 
-    std.debug.print("Received packet size {d}\n", .{data_size});
+    // std.debug.print("Received packet size {d}\n", .{data_size});
 
-    const nals = switch (data_slice[0]) {
-        0 => split_nals(data_slice) catch |err| {
-            std.debug.print("Error splitting NAL units: {any}\n", .{err});
-            return -1;
-        },
-        // 1 => {avcc/mp4}
-        else => unreachable,
+    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // defer arena.deinit();
+    //
+    // const allocator = arena.allocator();
+    // const h: *ZigH264Context = ctx.?.priv_data.?;
+    //if (ctx.?.priv_data) |data| {
+    //    std.debug.print("priv_data is not null: {any}\n", .{data});
+    //} else {
+    //    std.debug.print("priv_data is NULL!!!\n", .{});
+    //}
+    var h = @as(*ZigH264Context, @ptrCast(@alignCast(ctx.?.priv_data.?)));
+
+    // std.debug.print("ZigH264Context h: {any}\n", .{h});
+
+    h.raw_nal_buffer.appendSlice(std.heap.c_allocator, data_slice) catch |err| {
+        std.debug.print("Error allocator memory: {any}\n", .{err});
+        return -1;
     };
 
-    _ = nals;
+    // std.debug.print("appendSlice success! {any}\n", .{h.raw_nal_buffer});
+    // 有必要删除之前的data吗?担心性能不够
+
+    // 暂时不做switch
+    split_nals(std.heap.c_allocator, h) catch |err| {
+        std.debug.print("Error splitting NAL units: {any}\n", .{err});
+    };
+    // const nals = switch (data_slice[0]) {
+    //     0 => split_nals(allocator, &h.raw_nal_buffer) catch |err| {
+    //         std.debug.print("Error splitting NAL units: {any}\n", .{err});
+    //         return -1;
+    //     },
+    //     // 1 => {avcc/mp4}
+    //     else => unreachable,
+    // };
+
+    // _ = nals;
     // 编写自己的解码器
     //
     // QUES: 弄清楚整体的解码流程
@@ -203,7 +264,7 @@ export fn my_zigh264(
     // 弄清楚需要输出的格式
     // 弄清楚怎么输出(中间的各种必要步骤)
 
-    _ = ctx;
+    // _ = ctx;
     _ = frame;
     _ = got_packet;
     // _ = pkt;
