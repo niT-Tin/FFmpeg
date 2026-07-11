@@ -3,12 +3,13 @@ const Io = std.Io;
 
 var g_h: ZigH264Context = undefined;
 var g_initialized: bool = false;
+var nal_count: usize = 0;
 
 const FFmpeg = @import("ffmpeg");
 
 const NALUnit = struct {
     data: []u8,
-    nal_type: u5,
+    nal_type: NALType,
     start_code_len: u8,
 };
 
@@ -16,6 +17,37 @@ pub const NALError = error{
     NoStartCode,
     InvalidData,
     OutOfMemory,
+};
+
+const NALType = enum(u5) {
+    H264_NAL_UNSPECIFIED = 0,
+    H264_NAL_SLICE = 1, // 非 IDR 图像的编码条带
+    H264_NAL_DPA = 2, // 数据分区 A
+    H264_NAL_DPB = 3, // 数据分区 B
+    H264_NAL_DPC = 4, // 数据分区 C
+    H264_NAL_IDR_SLICE = 5, // IDR 图像编码条带 (关
+    H264_NAL_SEI = 6, // 补充增强信息
+    H264_NAL_SPS = 7, // 序列参数集
+    H264_NAL_PPS = 8, // 图像参数集
+    H264_NAL_AUD = 9, // 访问单元分隔符
+    H264_NAL_END_SEQUENCE = 10, // 序列结束
+    H264_NAL_END_STREAM = 11, // 码流结束
+    H264_NAL_FILLER_DATA = 12, // 填充数据
+    H264_NAL_SPS_EXT = 13, // SPS 扩展
+    H264_NAL_PREFIX = 14, // 前缀 NAL (用于
+    // SVC/MVC)
+    H264_NAL_SUB_SPS = 15, // 子集 SPS (用于 SVC)
+    H264_NAL_DPS = 16, // 深度参数集 (3D)
+    H264_NAL_RESERVED17 = 17, // 保留
+    H264_NAL_RESERVED18 = 18, // 保留
+    H264_NAL_AUXILIARY_SLICE = 19, // 辅助编码图像
+    H264_NAL_EXTEN_SLICE = 20, // 扩展条带 (SVC/MVC)
+    H264_NAL_DEPTH_EXTEN_SLICE = 21, // 深度扩展条带 (3D)
+    // 22-23 H264_NAL_RESERVED22/23     保留
+    // 24-31 H264_NAL_UNSPECIFIED24-31  未指定 (RTP 用
+    //                                  24=STAP-A, 28=FU-A)
+    //
+    // 重要补充：类型 14 和 20（SVC/MVC 扩展）的 NAL unit header 不是
 };
 
 pub const ZigH264Context = struct {
@@ -69,22 +101,27 @@ pub const NALSplitter = struct {
 
         const next_start = self.findStartCode(nalu_start);
 
-        const nalu_end = if (next_start) |ns| ns.pos else self.data.len;
+        var nalu_end = if (next_start) |ns| ns.pos else self.data.len;
+        // 去除尾部填充00
+        while (nalu_end > nalu_start and self.data[nalu_end - 1] == 0) {
+            nalu_end -= 1;
+        }
         const nalu_len = nalu_end - nalu_start;
 
         if (nalu_len == 0) {
             self.pos = nalu_end;
             return NALError.InvalidData;
         }
-        const nalu_data = try self.allocator.dupe(u8, self.data[nalu_start..nalu_end]);
+        // const nalu_data = try self.allocator.dupe(u8, self.data[nalu_start..nalu_end]);
+        const nalu_data = self.data[nalu_start..nalu_end];
         const nal_type = @as(u5, @intCast(nalu_data[0] & 0x1F));
 
-        self.pos = nalu_end;
-        h.read_pos = self.pos;
+        // self.pos = nalu_end;
+        h.read_pos = nalu_end;
 
         return NALUnit{
             .data = nalu_data,
-            .nal_type = nal_type,
+            .nal_type = @enumFromInt(nal_type),
             .start_code_len = start_code.len,
         };
     }
@@ -94,17 +131,6 @@ pub const NALSplitter = struct {
     }
 };
 
-// pub fn extractAllNALUnits(allocator: std.mem.Allocator, data: []u8) ![]NALUnit {
-//     var list = try std.ArrayList(NALUnit).initCapacity(allocator, 100);
-//     defer list.deinit(allocator);
-//
-//     var splitter = NALSplitter.init(allocator, data);
-//
-//     while (try splitter.next()) |nal| {
-//         try list.append(allocator, nal);
-//     }
-//     return try list.toOwnedSlice(allocator);
-// }
 
 const Pps = struct {};
 const Sps = struct {};
@@ -125,21 +151,41 @@ const TypeError = error{
 
 fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     var splitter = NALSplitter.init(allocator, h.raw_nal_buffer.items);
-    var nal_count: usize = 0;
 
     while (try splitter.next(h)) |nal| {
         nal_count += 1;
-        const type_name = switch (nal.nal_type) {
-            7 => "SPS",
-            8 => "PPS",
-            5 => "IDR",
-            1 => "非IDR Slice",
-            6 => "SEI",
-            9 => "分隔符",
-            12 => "填充数据",
-            28 => "FU-A (分片)",
-            29 => "FU-B (分片)",
-            else => "Unknown",
+        const type_name = @tagName(nal.nal_type);
+        // 这个switch后续可能会用到，但是目前暂时不需要
+        // const type_name = switch (nal.nal_type) {
+        //     inline else => |tag| @tagName(tag),
+            // .H264_NAL_UNSPECIFIED = 0,
+            // .H264_NAL_SLICE = 1, // 非 IDR 图像的编码条带
+            // .H264_NAL_DPA = 2, // 数据分区 A
+            // .H264_NAL_DPB = 3, // 数据分区 B
+            // .H264_NAL_DPC = 4, // 数据分区 C
+            // .H264_NAL_IDR_SLICE = 5, // IDR 图像编码条带 (关
+            // .H264_NAL_SEI = 6, // 补充增强信息
+            // .H264_NAL_SPS = 7, // 序列参数集
+            // .H264_NAL_PPS = 8, // 图像参数集
+            // .H264_NAL_AUD = 9, // 访问单元分隔符
+            // .H264_NAL_END_SEQUENCE = 10, // 序列结束
+            // .H264_NAL_END_STREAM = 11, // 码流结束
+            // .H264_NAL_FILLER_DATA = 12, // 填充数据
+            // .H264_NAL_SPS_EXT = 13, // SPS 扩展
+            // .H264_NAL_PREFIX = 14, // 前缀 NAL (用于
+            // .// SVC/MVC)
+            // .H264_NAL_SUB_SPS = 15, // 子集 SPS (用于 SVC)
+            // .H264_NAL_DPS = 16, // 深度参数集 (3D)
+            // .H264_NAL_RESERVED17 = 17, // 保留
+            // .H264_NAL_RESERVED18 = 18, // 保留
+            // .H264_NAL_AUXILIARY_SLICE = 19, // 辅助编码图像
+            // .H264_NAL_EXTEN_SLICE = 20, // 扩展条带 (SVC/MVC)
+            // .H264_NAL_DEPTH_EXTEN_SLICE = 21, // 深度扩展条带 (3D)
+        //     else => "Unknown",
+        // };
+        h.nals.append(nal) catch |err| {
+            std.debug.print("Error appending NAL unit: {any}\n", .{err});
+            return err;
         };
         std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ nal_count, type_name, nal.data.len, nal.start_code_len });
     } else {
