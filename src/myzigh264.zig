@@ -131,7 +131,6 @@ pub const NALSplitter = struct {
     }
 };
 
-
 const Pps = struct {};
 const Sps = struct {};
 
@@ -148,22 +147,54 @@ const TypeError = error{
 //         else => .Annex_B,
 //     };
 // }
+fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
+    var di: usize = 0;
+    var si: usize = 0;
+    var dst = try allocator.alloc(u8, src.len);
+
+    while (si + 2 <= src.len) {
+        if (src[si] == 0 and src[si + 1] == 0 and src[si + 2] == 3) {
+            dst[di] = 0;
+            dst[di + 1] = 0;
+            di += 2;
+            si += 3;
+        } else {
+            dst[di] = src[si];
+            di += 1;
+            si += 1;
+        }
+    }
+    return allocator.realloc(dst, di);
+}
+
+fn decode_slice(data: []u8) !void {
+    _ = data;
+    // const result: []u8 = "";
+    // 先这么直接返回
+    // return result;
+}
 
 fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     var splitter = NALSplitter.init(allocator, h.raw_nal_buffer.items);
 
     while (try splitter.next(h)) |nal| {
         nal_count += 1;
-        const type_name = @tagName(nal.nal_type);
+        // const type_name = @tagName(nal.nal_type);
+        // 处理emulation prevention bytes
+        const rbsp_data = try remove_emulation_prevention(allocator, nal.data);
+        defer allocator.free(rbsp_data);
         // 这个switch后续可能会用到，但是目前暂时不需要
-        // const type_name = switch (nal.nal_type) {
-        //     inline else => |tag| @tagName(tag),
-            // .H264_NAL_UNSPECIFIED = 0,
-            // .H264_NAL_SLICE = 1, // 非 IDR 图像的编码条带
+        const type_name = naltype: switch (nal.nal_type) {
+            // inline else => |tag| @tagName(tag),
+            .H264_NAL_UNSPECIFIED => continue,
+            .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
+                try decode_slice(rbsp_data); // 非 IDR 图像的编码条带
+                break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
+            },
+            else => @tagName(nal.nal_type),
             // .H264_NAL_DPA = 2, // 数据分区 A
             // .H264_NAL_DPB = 3, // 数据分区 B
             // .H264_NAL_DPC = 4, // 数据分区 C
-            // .H264_NAL_IDR_SLICE = 5, // IDR 图像编码条带 (关
             // .H264_NAL_SEI = 6, // 补充增强信息
             // .H264_NAL_SPS = 7, // 序列参数集
             // .H264_NAL_PPS = 8, // 图像参数集
@@ -181,12 +212,12 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
             // .H264_NAL_AUXILIARY_SLICE = 19, // 辅助编码图像
             // .H264_NAL_EXTEN_SLICE = 20, // 扩展条带 (SVC/MVC)
             // .H264_NAL_DEPTH_EXTEN_SLICE = 21, // 深度扩展条带 (3D)
-        //     else => "Unknown",
-        // };
-        h.nals.append(nal) catch |err| {
-            std.debug.print("Error appending NAL unit: {any}\n", .{err});
-            return err;
+            //     else => "Unknown",
         };
+        // h.nals.append(nal) catch |err| {
+        //     std.debug.print("Error appending NAL unit: {any}\n", .{err});
+        //     return err;
+        // };
         std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ nal_count, type_name, nal.data.len, nal.start_code_len });
     } else {
         return;
@@ -194,10 +225,6 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     std.debug.print("共找到 {d} 个 NAL 单元\n", .{nal_count});
 
     // return TypeError.NotMaintainedType;
-}
-
-fn remove_emulation_prevention(src: []u8) ![]u8 {
-    _ = src;
 }
 
 fn parse_sps(data: []u8) !Sps {
