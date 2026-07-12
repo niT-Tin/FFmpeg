@@ -1,4 +1,5 @@
 const std = @import("std");
+const BitReader = @import("tools.zig").BitReader;
 const Io = std.Io;
 
 var g_h: ZigH264Context = undefined;
@@ -53,13 +54,14 @@ const NALType = enum(u5) {
 pub const ZigH264Context = struct {
     width: u32 = 0,
     height: u32 = 0,
-    sps_list: std.ArrayList(Sps),
-    pps_list: std.ArrayList(Pps),
+    sps_list: std.ArrayList(SPS),
+    pps_list: std.ArrayList(PPS),
     nals: std.ArrayList(NALUnit),
     // nal data
     raw_nal_buffer: std.ArrayList(u8),
     read_pos: usize,
 };
+
 
 pub const NALSplitter = struct {
     allocator: std.mem.Allocator,
@@ -131,8 +133,8 @@ pub const NALSplitter = struct {
     }
 };
 
-const Pps = struct {};
-const Sps = struct {};
+const PPS = struct {};
+const SPS = struct {};
 
 const H264Type = enum { Annex_B, AVCC };
 
@@ -167,11 +169,34 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     return allocator.realloc(dst, di);
 }
 
-fn decode_slice(data: []u8) !void {
+fn decode_slice(data: []u8, reader: BitReader) !void {
     _ = data;
+    _ = reader;
     // const result: []u8 = "";
     // 先这么直接返回
     // return result;
+}
+
+// ue(v) 解码:
+//      1. 读 leadingZeroBits: 数连续 0 的个数(discard)，直到遇见第一个 1 → 得到 N
+//      2. 再读 N 个 bit → 得到 suffix (无符号整数)
+//      3. codeNum = (1 << N) - 1 + suffix
+//
+//    se(v) 解码:
+//      1. 先用 ue(v) 得到 codeNum
+//      2. 映射: k = (codeNum + 1) / 2
+//              如果 codeNum 是偶数 → -k, 奇数 → k
+
+fn read_ue(data: []u8) !u32 {
+    // var leading_zero_bytes: usize = 0;
+    // for (data) |byte| {}
+    _ = data;
+    return 0;
+}
+
+fn read_se(data: []u8) !u32 {
+    _ = data;
+    return 0;
 }
 
 fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
@@ -179,40 +204,31 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
 
     while (try splitter.next(h)) |nal| {
         nal_count += 1;
-        // const type_name = @tagName(nal.nal_type);
-        // 处理emulation prevention bytes
+
         const rbsp_data = try remove_emulation_prevention(allocator, nal.data);
         defer allocator.free(rbsp_data);
+        const bit_reader = BitReader.init(rbsp_data);
         // 这个switch后续可能会用到，但是目前暂时不需要
         const type_name = naltype: switch (nal.nal_type) {
             // inline else => |tag| @tagName(tag),
             .H264_NAL_UNSPECIFIED => continue,
+            // .H264_NAL_SPS => {
+            //     try parse_sps(rbsp_data);
+            //     break :naltype "H264_NAL_SPS";
+            // },
+            // .H264_NAL_PPS => {
+            //     try parse_pps(rbsp_data);
+            //     break :naltype "H264_NAL_PPS";
+            // },
+            .H264_NAL_SEI => {
+                try decode_slice(rbsp_data, bit_reader); // SEI 信息的解码
+                break :naltype "H264_NAL_SEI";
+            },
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
-                try decode_slice(rbsp_data); // 非 IDR 图像的编码条带
+                try decode_slice(rbsp_data, bit_reader); // 非 IDR 图像的编码条带
                 break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
             },
             else => @tagName(nal.nal_type),
-            // .H264_NAL_DPA = 2, // 数据分区 A
-            // .H264_NAL_DPB = 3, // 数据分区 B
-            // .H264_NAL_DPC = 4, // 数据分区 C
-            // .H264_NAL_SEI = 6, // 补充增强信息
-            // .H264_NAL_SPS = 7, // 序列参数集
-            // .H264_NAL_PPS = 8, // 图像参数集
-            // .H264_NAL_AUD = 9, // 访问单元分隔符
-            // .H264_NAL_END_SEQUENCE = 10, // 序列结束
-            // .H264_NAL_END_STREAM = 11, // 码流结束
-            // .H264_NAL_FILLER_DATA = 12, // 填充数据
-            // .H264_NAL_SPS_EXT = 13, // SPS 扩展
-            // .H264_NAL_PREFIX = 14, // 前缀 NAL (用于
-            // .// SVC/MVC)
-            // .H264_NAL_SUB_SPS = 15, // 子集 SPS (用于 SVC)
-            // .H264_NAL_DPS = 16, // 深度参数集 (3D)
-            // .H264_NAL_RESERVED17 = 17, // 保留
-            // .H264_NAL_RESERVED18 = 18, // 保留
-            // .H264_NAL_AUXILIARY_SLICE = 19, // 辅助编码图像
-            // .H264_NAL_EXTEN_SLICE = 20, // 扩展条带 (SVC/MVC)
-            // .H264_NAL_DEPTH_EXTEN_SLICE = 21, // 深度扩展条带 (3D)
-            //     else => "Unknown",
         };
         // h.nals.append(nal) catch |err| {
         //     std.debug.print("Error appending NAL unit: {any}\n", .{err});
@@ -227,12 +243,14 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     // return TypeError.NotMaintainedType;
 }
 
-fn parse_sps(data: []u8) !Sps {
+fn parse_sps(data: []u8) !SPS {
     _ = data;
+    return SPS{};
 }
 
-fn parse_pps(data: []u8) !Pps {
+fn parse_pps(data: []u8) !PPS {
     _ = data;
+    return PPS{};
 }
 
 export fn my_zigh264(
