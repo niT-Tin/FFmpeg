@@ -28,6 +28,7 @@ pub const BitReader = struct {
         if (self.u8_read_pos == 0x01) {
             // reset bits
             self.u8_read_pos = 0x80;
+            self.buf_read_pos += 1;
         } else {
             self.u8_read_pos = self.u8_read_pos >> 1;
         }
@@ -41,8 +42,8 @@ pub const BitReader = struct {
         }
         var result: u32 = 0;
         for (0..num) |i| {
-            // 因为要移动位，所以需要转为u8类型
-            const bit: u8 = try self.next_bit();
+            // 因为要移动位，所以需要转为u32类型
+            const bit: u32 = try self.next_bit();
             result |= bit << @intCast(num - i - 1);
         }
         return result;
@@ -110,7 +111,7 @@ test "mixed next_bit and next_bits" {
 
     try std.testing.expectEqual(@as(u32, 5), try br.next_bits(3)); // 101
     try std.testing.expectEqual(@as(u1, 0), try br.next_bit()); // 0
-    try std.testing.expectEqual(@as(u32, 3), try br.next_bits(4)); // 1010 -> 但我们已经读了 101，剩下 0，下 4 位 = 1010? 等等... 再确认
+    try std.testing.expectEqual(@as(u32, 10), try br.next_bits(4)); // 1010 -> 但我们已经读了 101，剩下 0，下 4 位 = 1010? 等等... 再确认
 }
 
 test "read exactly 32 bits" {
