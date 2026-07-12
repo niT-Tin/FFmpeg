@@ -18,6 +18,7 @@ pub const NALError = error{
     NoStartCode,
     InvalidData,
     OutOfMemory,
+    FMONotSupported,
 };
 
 const NALType = enum(u5) {
@@ -61,7 +62,6 @@ pub const ZigH264Context = struct {
     raw_nal_buffer: std.ArrayList(u8),
     read_pos: usize,
 };
-
 
 pub const NALSplitter = struct {
     allocator: std.mem.Allocator,
@@ -133,8 +133,154 @@ pub const NALSplitter = struct {
     }
 };
 
-const PPS = struct {};
-const SPS = struct {};
+const SPS = struct {
+    // ===== Level 1: 固定长度字段（必定存在） =====
+    profile_idc: u8, // u(8)
+    constraint_set0_flag: bool, // u(1)
+    constraint_set1_flag: bool, // u(1)
+    constraint_set2_flag: bool, // u(1)
+    constraint_set3_flag: bool, // u(1)
+    constraint_set4_flag: bool, // u(1)
+    constraint_set5_flag: bool, // u(1)
+    reserved_zero_2bits: u2 = 0, // u(2), 必须为 0
+    level_idc: u8, // u(8)
+
+    // ===== Level 2: ue(v) 核心字段（必定存在） =====
+    seq_parameter_set_id: u32, // ue(v)  范围 0~31
+    log2_max_frame_num_minus4: u32, // ue(v)  范围 0~12
+    pic_order_cnt_type: u32, // ue(v)  范围 0~2
+
+    // ===== Level 3: 按 pic_order_cnt_type 分支 =====
+    // if pic_order_cnt_type == 0
+    log2_max_pic_order_cnt_lsb_minus4: u32, // ue(v)
+
+    // if pic_order_cnt_type == 1
+    delta_pic_order_always_zero_flag: bool, // u(1)
+    offset_for_non_ref_pic: i32, // se(v)
+    offset_for_top_to_bottom_field: i32, // se(v)
+    num_ref_frames_in_pic_order_cnt_cycle: u32, // ue(v)
+    offset_for_ref_frame: [256]i32, // se(v) × N
+
+    // ===== Level 4: 继续必选字段 =====
+    num_ref_frames: u32, // ue(v)
+    gaps_in_frame_num_value_allowed_flag: bool, // u(1)
+    pic_width_in_mbs_minus1: u32, // ue(v)
+    pic_height_in_map_units_minus1: u32, // ue(v)
+    frame_mbs_only_flag: bool, // u(1)
+
+    // if !frame_mbs_only_flag
+    mb_adaptive_frame_field_flag: bool, // u(1)
+
+    direct_8x8_inference_flag: bool, // u(1)
+    frame_cropping_flag: bool, // u(1)
+
+    // if frame_cropping_flag
+    frame_crop_left_offset: u32, // ue(v)
+    frame_crop_right_offset: u32, // ue(v)
+    frame_crop_top_offset: u32, // ue(v)
+    frame_crop_bottom_offset: u32, // ue(v)
+
+    // ===== Level 5: VUI（跳过标记） =====
+    vui_parameters_present_flag: bool, // u(1)
+    // if vui_parameters_present_flag: vui_parameters() → 先跳过
+    pub fn init() SPS {
+        return SPS{
+            .profile_idc = 0,
+            .constraint_set0_flag = false,
+            .constraint_set1_flag = false,
+            .constraint_set2_flag = false,
+            .constraint_set3_flag = false,
+            .constraint_set4_flag = false,
+            .constraint_set5_flag = false,
+            .level_idc = 0,
+
+            .seq_parameter_set_id = 0,
+            .log2_max_frame_num_minus4 = 0,
+            .pic_order_cnt_type = 0,
+
+            .log2_max_pic_order_cnt_lsb_minus4 = 0,
+
+            .delta_pic_order_always_zero_flag = false,
+            .offset_for_non_ref_pic = 0,
+            .offset_for_top_to_bottom_field = 0,
+            .num_ref_frames_in_pic_order_cnt_cycle = 0,
+            .offset_for_ref_frame = [_]i32{0} ** 256,
+
+            .num_ref_frames = 0,
+            .gaps_in_frame_num_value_allowed_flag = false,
+            .pic_width_in_mbs_minus1 = 0,
+            .pic_height_in_map_units_minus1 = 0,
+            .frame_mbs_only_flag = true,
+
+            .mb_adaptive_frame_field_flag = false,
+
+            .direct_8x8_inference_flag = true,
+            .frame_cropping_flag = false,
+
+            .frame_crop_left_offset = 0,
+            .frame_crop_right_offset = 0,
+            .frame_crop_top_offset = 0,
+            .frame_crop_bottom_offset = 0,
+
+            .vui_parameters_present_flag = false,
+        };
+    }
+};
+const PPS = struct {
+    // ===== 核心字段（必定存在） =====
+    pic_parameter_set_id: u32, // ue(v)  范围 0~255
+    seq_parameter_set_id: u32, // ue(v)  范围 0~31
+    entropy_coding_mode_flag: bool, // u(1)   0=CAVLC, 1=CABAC
+    pic_order_present_flag: bool, // u(1)   bottom_field_pic_order 相关
+    num_slice_groups_minus1: u32, // ue(v)   0 表示没有 slice group
+
+    // ===== slice group 分支（num_slice_groups_minus1 > 0 时） =====
+    slice_group_map_type: u32, // ue(v)
+    // 先不处理大于0的情况吧，据说绝大多数视频num_slice_groups_minus1都是0
+    // type 0: run_length_minus1[i]     ue(v) × N
+    // type 2: top_left[i], bottom_right[i]  ue(v) × N × 2
+    // type 3/4/5: slice_group_change_direction_flag u(1)
+    //             slice_group_change_rate_minus1   ue(v)
+    // type 6: pic_size_in_map_units_minus1  ue(v)
+    //         slice_group_id[i]              u(v) × N
+
+    num_ref_idx_l0_active_minus1: u32, // ue(v)
+    num_ref_idx_l1_active_minus1: u32, // ue(v)
+    weighted_pred_flag: bool, // u(1)
+    weighted_bipred_idc: u2, // u(2)
+
+    pic_init_qp_minus26: i32, // se(v)   初始 QP = 26 + 此值
+    pic_init_qs_minus26: i32, // se(v)   SP/SI 用
+    chroma_qp_index_offset: i32, // se(v)
+
+    deblocking_filter_control_present_flag: bool, // u(1)
+    constrained_intra_pred_flag: bool, // u(1)
+    redundant_pic_cnt_present_flag: bool, // u(1)
+    pub fn init() PPS {
+        return PPS{
+            .pic_parameter_set_id = 0,
+            .seq_parameter_set_id = 0,
+            .entropy_coding_mode_flag = false,
+            .pic_order_present_flag = false,
+            .num_slice_groups_minus1 = 0,
+
+            .slice_group_map_type = 0,
+
+            .num_ref_idx_l0_active_minus1 = 0,
+            .num_ref_idx_l1_active_minus1 = 0,
+            .weighted_pred_flag = false,
+            .weighted_bipred_idc = 0,
+
+            .pic_init_qp_minus26 = 0,
+            .pic_init_qs_minus26 = 0,
+            .chroma_qp_index_offset = 0,
+
+            .deblocking_filter_control_present_flag = false,
+            .constrained_intra_pred_flag = false,
+            .redundant_pic_cnt_present_flag = false,
+        };
+    }
+};
 
 const H264Type = enum { Annex_B, AVCC };
 
@@ -142,13 +288,6 @@ const TypeError = error{
     NotMaintainedType,
 };
 
-// fn what_type(type_data: []u8) !H264Type {
-//     return switch (type_data[0]) {
-//         1 => .AVCC,
-//         // 直接这么判断(可能会存在问题？)
-//         else => .Annex_B,
-//     };
-// }
 fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     var di: usize = 0;
     var si: usize = 0;
@@ -187,16 +326,23 @@ fn decode_slice(data: []u8, reader: BitReader) !void {
 //      2. 映射: k = (codeNum + 1) / 2
 //              如果 codeNum 是偶数 → -k, 奇数 → k
 
-fn read_ue(data: []u8) !u32 {
-    // var leading_zero_bytes: usize = 0;
-    // for (data) |byte| {}
-    _ = data;
-    return 0;
+// 读取一个u字段
+fn read_ue(nal_bit_reader: *BitReader) !u32 {
+    var leadingZeroBits: usize = 0;
+    while (true) {
+        const bit = try nal_bit_reader.next_bit();
+        if (bit == 1) break;
+        leadingZeroBits += 1;
+    }
+    if (leadingZeroBits == 0) return 0;
+    return (@as(u32, 1) << @intCast(leadingZeroBits)) - 1 + try nal_bit_reader.next_bits(leadingZeroBits);
 }
 
-fn read_se(data: []u8) !u32 {
-    _ = data;
-    return 0;
+fn read_se(nal_bit_reader: *BitReader) !i32 {
+    const code_num = try read_ue(nal_bit_reader);
+    const k: i32 = @intCast((code_num + 1) / 2);
+    if (code_num % 2 == 0) return -k;
+    return k;
 }
 
 fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
@@ -205,21 +351,23 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     while (try splitter.next(h)) |nal| {
         nal_count += 1;
 
-        const rbsp_data = try remove_emulation_prevention(allocator, nal.data);
+        const rbsp_data = try remove_emulation_prevention(allocator, nal.data[1..]);
         defer allocator.free(rbsp_data);
-        const bit_reader = BitReader.init(rbsp_data);
+        var bit_reader = BitReader.init(rbsp_data);
         // 这个switch后续可能会用到，但是目前暂时不需要
         const type_name = naltype: switch (nal.nal_type) {
             // inline else => |tag| @tagName(tag),
             .H264_NAL_UNSPECIFIED => continue,
-            // .H264_NAL_SPS => {
-            //     try parse_sps(rbsp_data);
-            //     break :naltype "H264_NAL_SPS";
-            // },
-            // .H264_NAL_PPS => {
-            //     try parse_pps(rbsp_data);
-            //     break :naltype "H264_NAL_PPS";
-            // },
+            .H264_NAL_SPS => {
+                const sps = try parse_sps(&bit_reader);
+                std.debug.print("SPS: {any}\n", .{sps});
+                break :naltype "H264_NAL_SPS";
+            },
+            .H264_NAL_PPS => {
+                const pps = try parse_pps(&bit_reader);
+                std.debug.print("PPS: {any}\n", .{pps});
+                break :naltype "H264_NAL_PPS";
+            },
             .H264_NAL_SEI => {
                 try decode_slice(rbsp_data, bit_reader); // SEI 信息的解码
                 break :naltype "H264_NAL_SEI";
@@ -234,7 +382,9 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
         //     std.debug.print("Error appending NAL unit: {any}\n", .{err});
         //     return err;
         // };
-        std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ nal_count, type_name, nal.data.len, nal.start_code_len });
+        if (!std.mem.eql(u8, type_name, "H264_NAL_SLICE,H264_NAL_IDR_SLICE")) {
+            std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ nal_count, type_name, nal.data.len, nal.start_code_len });
+        }
     } else {
         return;
     }
@@ -243,14 +393,78 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     // return TypeError.NotMaintainedType;
 }
 
-fn parse_sps(data: []u8) !SPS {
-    _ = data;
-    return SPS{};
+fn parse_sps(bit_reader: *BitReader) !SPS {
+    var sps = SPS.init();
+    sps.profile_idc = @intCast(try bit_reader.next_bits(8));
+    sps.constraint_set0_flag = try bit_reader.next_bit() != 0;
+    sps.constraint_set1_flag = try bit_reader.next_bit() != 0;
+    sps.constraint_set2_flag = try bit_reader.next_bit() != 0;
+    sps.constraint_set3_flag = try bit_reader.next_bit() != 0;
+    sps.constraint_set4_flag = try bit_reader.next_bit() != 0;
+    sps.constraint_set5_flag = try bit_reader.next_bit() != 0;
+
+    _ = try bit_reader.next_bits(2);
+    sps.level_idc = @intCast(try bit_reader.next_bits(8));
+
+    sps.seq_parameter_set_id = try read_ue(bit_reader);
+    sps.log2_max_frame_num_minus4 = try read_ue(bit_reader);
+    sps.pic_order_cnt_type = try read_ue(bit_reader);
+
+    if (sps.pic_order_cnt_type == 0) {
+        sps.log2_max_pic_order_cnt_lsb_minus4 = try read_ue(bit_reader);
+    } else if (sps.pic_order_cnt_type == 1) {
+        sps.delta_pic_order_always_zero_flag = try bit_reader.next_bit() != 0;
+        sps.offset_for_non_ref_pic = try read_se(bit_reader);
+        sps.offset_for_top_to_bottom_field = try read_se(bit_reader);
+        sps.num_ref_frames_in_pic_order_cnt_cycle = try read_ue(bit_reader);
+        for (0..sps.num_ref_frames_in_pic_order_cnt_cycle) |i| {
+            sps.offset_for_ref_frame[i] = try read_se(bit_reader);
+        }
+    }
+
+    sps.num_ref_frames = try read_ue(bit_reader);
+    sps.gaps_in_frame_num_value_allowed_flag = try bit_reader.next_bit() != 0;
+    sps.pic_width_in_mbs_minus1 = try read_ue(bit_reader);
+    sps.frame_mbs_only_flag = try bit_reader.next_bit() != 0;
+    if (!sps.frame_mbs_only_flag) {
+        sps.mb_adaptive_frame_field_flag = try bit_reader.next_bit() != 0;
+    }
+    sps.direct_8x8_inference_flag = try bit_reader.next_bit() != 0;
+    sps.frame_cropping_flag = try bit_reader.next_bit() != 0;
+    if (sps.frame_cropping_flag) {
+        sps.frame_crop_left_offset = try read_ue(bit_reader);
+        sps.frame_crop_right_offset = try read_ue(bit_reader);
+        sps.frame_crop_top_offset = try read_ue(bit_reader);
+        sps.frame_crop_bottom_offset = try read_ue(bit_reader);
+    }
+    sps.vui_parameters_present_flag = try bit_reader.next_bit() != 0;
+
+    return sps;
 }
 
-fn parse_pps(data: []u8) !PPS {
-    _ = data;
-    return PPS{};
+fn parse_pps(bit_reader: *BitReader) !PPS {
+    var pps = PPS.init();
+    pps.pic_parameter_set_id = try read_ue(bit_reader);
+    pps.seq_parameter_set_id = try read_ue(bit_reader);
+    pps.entropy_coding_mode_flag = try bit_reader.next_bit() != 0;
+    pps.pic_order_present_flag = try bit_reader.next_bit() != 0;
+    pps.num_slice_groups_minus1 = try read_ue(bit_reader);
+    if (pps.num_slice_groups_minus1 > 0) {
+        return NALError.FMONotSupported;
+    }
+    pps.num_ref_idx_l0_active_minus1 = try read_ue(bit_reader);
+    pps.num_ref_idx_l1_active_minus1 = try read_ue(bit_reader);
+    pps.weighted_pred_flag = try bit_reader.next_bit() != 0;
+    pps.weighted_bipred_idc = @intCast(try bit_reader.next_bits(2));
+
+    pps.pic_init_qp_minus26 = try read_se(bit_reader);
+    pps.pic_init_qs_minus26 = try read_se(bit_reader);
+    pps.chroma_qp_index_offset = try read_se(bit_reader);
+
+    pps.deblocking_filter_control_present_flag = try bit_reader.next_bit() != 0;
+    pps.constrained_intra_pred_flag = try bit_reader.next_bit() != 0;
+    pps.redundant_pic_cnt_present_flag = try bit_reader.next_bit() != 0;
+    return pps;
 }
 
 export fn my_zigh264(
