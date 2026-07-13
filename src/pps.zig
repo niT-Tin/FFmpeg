@@ -1,4 +1,4 @@
-const BitReader = @import("bit_reader.zig");
+const BitReader = @import("bit_reader.zig").BitReader;
 const expGolomb = @import("exp_golomb.zig");
 const NALError = @import("types.zig").NALError;
 

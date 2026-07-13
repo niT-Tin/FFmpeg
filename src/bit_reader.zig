@@ -19,7 +19,7 @@ pub const BitReader = struct {
         };
     }
 
-    pub fn peak(self: BitReader) !u1 {
+    pub fn peek(self: BitReader) !u1 {
         if (self.buf_read_pos >= self.buf.len) {
             return BitReadError.BufEmpty;
         }
@@ -187,16 +187,16 @@ test "peak does not consume bits" {
     var br = BitReader.init(&data);
 
     // 第一次 peak 应该返回 bit 1 (MSB)
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
     // 再次 peak 应该返回同样的值
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
 
     // next_bit 应该返回同样的值，并且消耗它
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit());
 
     // 现在 peak 应该看到下一位 0
-    try std.testing.expectEqual(@as(u1, 0), try br.peak());
+    try std.testing.expectEqual(@as(u1, 0), try br.peek());
     try std.testing.expectEqual(@as(u1, 0), try br.next_bit());
 }
 test "peak and next_bit interleaved" {
@@ -204,25 +204,25 @@ test "peak and next_bit interleaved" {
     const data = [_]u8{0b10110010};
     var br = BitReader.init(&data);
 
-    try std.testing.expectEqual(@as(u1, 1), try br.peak()); // bit 0
+    try std.testing.expectEqual(@as(u1, 1), try br.peek()); // bit 0
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit()); // consume bit 0
 
-    try std.testing.expectEqual(@as(u1, 0), try br.peak()); // bit 1
+    try std.testing.expectEqual(@as(u1, 0), try br.peek()); // bit 1
     try std.testing.expectEqual(@as(u1, 0), try br.next_bit()); // consume bit 1
 
-    try std.testing.expectEqual(@as(u1, 1), try br.peak()); // bit 2
+    try std.testing.expectEqual(@as(u1, 1), try br.peek()); // bit 2
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit()); // consume bit 2
 
-    try std.testing.expectEqual(@as(u1, 1), try br.peak()); // bit 3
+    try std.testing.expectEqual(@as(u1, 1), try br.peek()); // bit 3
     try std.testing.expectEqual(@as(u32, 2), try br.next_bits(2)); // consume bits 3,4
 
-    try std.testing.expectEqual(@as(u1, 0), try br.peak()); // bit 5
+    try std.testing.expectEqual(@as(u1, 0), try br.peek()); // bit 5
     try std.testing.expectEqual(@as(u1, 0), try br.next_bit()); // consume bit 5
 
-    try std.testing.expectEqual(@as(u1, 1), try br.peak()); // bit 6
+    try std.testing.expectEqual(@as(u1, 1), try br.peek()); // bit 6
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit()); // consume bit 6
 
-    try std.testing.expectEqual(@as(u1, 0), try br.peak()); // bit 7
+    try std.testing.expectEqual(@as(u1, 0), try br.peek()); // bit 7
     try std.testing.expectEqual(@as(u1, 0), try br.next_bit()); // consume bit 7
 }
 test "peak across byte boundary" {
@@ -234,22 +234,22 @@ test "peak across byte boundary" {
     // 跳过 7 个 0
     var i: usize = 0;
     while (i < 7) : (i += 1) {
-        try std.testing.expectEqual(@as(u1, 0), try br.peak());
+        try std.testing.expectEqual(@as(u1, 0), try br.peek());
         try std.testing.expectEqual(@as(u1, 0), try br.next_bit());
     }
 
     // 现在处于字节边界：pos 指向第1字节最后一位 (bit value = 1)
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit());
 
     // 移到第2字节第一位 (bit value = 1)
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit());
 
     // 下 7 位都是 0
     var j: usize = 0;
     while (j < 7) : (j += 1) {
-        try std.testing.expectEqual(@as(u1, 0), try br.peak());
+        try std.testing.expectEqual(@as(u1, 0), try br.peek());
         try std.testing.expectEqual(@as(u1, 0), try br.next_bit());
     }
 }
@@ -261,14 +261,14 @@ test "peak after next_bits consumption" {
     _ = try br.next_bits(3);
     // 剩余: 1 0 1 1 0  0 0 1 1 1 0 0 1
     //        ^ 当前指向这里
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit()); // 消耗
 
     // 再读 2 位: 0 1 = 1
     _ = try br.next_bits(2);
     // 剩余: 1 0  0 0 1 1 1 0 0 1
     //        ^
-    try std.testing.expectEqual(@as(u1, 1), try br.peak());
+    try std.testing.expectEqual(@as(u1, 1), try br.peek());
     try std.testing.expectEqual(@as(u1, 1), try br.next_bit());
 }
 
@@ -276,7 +276,7 @@ test "peak on empty buffer returns error" {
     const data = [_]u8{};
     var br = BitReader.init(&data);
 
-    try std.testing.expectError(BitReadError.BufEmpty, br.peak());
+    try std.testing.expectError(BitReadError.BufEmpty, br.peek());
 }
 
 test "peak after reading all bits returns error" {
@@ -285,7 +285,7 @@ test "peak after reading all bits returns error" {
 
     _ = try br.next_bits(8); // 读完所有位
 
-    try std.testing.expectError(BitReadError.BufEmpty, br.peak());
+    try std.testing.expectError(BitReadError.BufEmpty, br.peek());
 }
 test "peak on all-ones buffer" {
     const data = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
@@ -293,9 +293,9 @@ test "peak on all-ones buffer" {
 
     var i: usize = 0;
     while (i < 32) : (i += 1) {
-        try std.testing.expectEqual(@as(u1, 1), try br.peak());
+        try std.testing.expectEqual(@as(u1, 1), try br.peek());
         _ = try br.next_bit();
     }
 
-    try std.testing.expectError(BitReadError.BufEmpty, br.peak());
+    try std.testing.expectError(BitReadError.BufEmpty, br.peek());
 }
