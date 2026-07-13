@@ -293,7 +293,7 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     var si: usize = 0;
     var dst = try allocator.alloc(u8, src.len);
 
-    while (si + 2 <= src.len) {
+    while (si + 2 < src.len) {
         if (src[si] == 0 and src[si + 1] == 0 and src[si + 2] == 3) {
             dst[di] = 0;
             dst[di + 1] = 0;
@@ -304,6 +304,11 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
             di += 1;
             si += 1;
         }
+    }
+    while (si < src.len) {
+        dst[di] = src[si];
+        di += 1;
+        si += 1;
     }
     return allocator.realloc(dst, di);
 }
@@ -334,8 +339,11 @@ fn read_ue(nal_bit_reader: *BitReader) !u32 {
         if (bit == 1) break;
         leadingZeroBits += 1;
     }
-    if (leadingZeroBits == 0) return 0;
-    return (@as(u32, 1) << @intCast(leadingZeroBits)) - 1 + try nal_bit_reader.next_bits(leadingZeroBits);
+    const result: u32 = if (leadingZeroBits == 0)
+        @as(u32, 0)
+    else
+        ((@as(u32, 1) << @intCast(leadingZeroBits)) - 1) + try nal_bit_reader.next_bits(leadingZeroBits);
+    return result;
 }
 
 fn read_se(nal_bit_reader: *BitReader) !i32 {
@@ -406,7 +414,43 @@ fn parse_sps(bit_reader: *BitReader) !SPS {
     _ = try bit_reader.next_bits(2);
     sps.level_idc = @intCast(try bit_reader.next_bits(8));
 
+    const high_profiles = [_]u8{ 100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135 };
+    const has_high_ext: bool = for (high_profiles) |p| {
+        if (sps.profile_idc == p) break true;
+    } else false;
+
     sps.seq_parameter_set_id = try read_ue(bit_reader);
+
+    if (has_high_ext) {
+        const chroma_format_idc = try read_ue(bit_reader);
+        if (chroma_format_idc == 3) {
+            _ = try bit_reader.next_bit();
+        }
+
+        _ = try read_ue(bit_reader); // bit_depth_luma_minus8
+        _ = try read_ue(bit_reader); // bit_depth_chroma_minus8
+        _ = try bit_reader.next_bit(); // qpprime_y_zero_transform_bypass_flag
+        const scaling_present = try bit_reader.next_bit() != 0;
+
+        if (scaling_present) {
+            const scaling_lists = if (chroma_format_idc != 3) @as(u32, 8) else 12;
+            for (0..scaling_lists) |i| {
+                const flag = try bit_reader.next_bit() != 0;
+                if (flag) {
+                    const list_size: u32 = if (i < 6) 16 else 64;
+                    var last_scale: i32 = 8;
+                    var next_scale: i32 = 8;
+                    for (0..list_size) |_| {
+                        if (next_scale != 0) {
+                            const delta = try read_se(bit_reader);
+                            next_scale = (last_scale + delta) & 0xFF;
+                        }
+                        last_scale = if (next_scale != 0) next_scale else last_scale;
+                    }
+                }
+            }
+        }
+    }
     sps.log2_max_frame_num_minus4 = try read_ue(bit_reader);
     sps.pic_order_cnt_type = try read_ue(bit_reader);
 
@@ -425,6 +469,7 @@ fn parse_sps(bit_reader: *BitReader) !SPS {
     sps.num_ref_frames = try read_ue(bit_reader);
     sps.gaps_in_frame_num_value_allowed_flag = try bit_reader.next_bit() != 0;
     sps.pic_width_in_mbs_minus1 = try read_ue(bit_reader);
+    sps.pic_height_in_map_units_minus1 = try read_ue(bit_reader);
     sps.frame_mbs_only_flag = try bit_reader.next_bit() != 0;
     if (!sps.frame_mbs_only_flag) {
         sps.mb_adaptive_frame_field_flag = try bit_reader.next_bit() != 0;
