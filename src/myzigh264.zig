@@ -3,10 +3,10 @@ const expGolomb = @import("exp_golomb.zig");
 const BitReader = @import("bit_reader.zig").BitReader;
 const ZigH264Context = @import("context.zig").ZigH264Context;
 const NALSplitter = @import("nal_splitter.zig").NALSplitter;
-const SPS = @import("sps.zig");
-const PPS = @import("pps.zig");
+const sps_mod = @import("sps.zig");
+const pps_mod = @import("pps.zig");
+const slice_mod = @import("slice.zig");
 const NALUnit = @import("types.zig").NALUnit;
-const Io = std.Io;
 
 var nal_count: usize = 0;
 
@@ -38,7 +38,7 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     return allocator.realloc(dst, di);
 }
 
-fn decode_slice(data: []u8, reader: BitReader) !void {
+fn decode_slice_data(data: []u8, reader: BitReader) !void {
     _ = data;
     _ = reader;
     // const result: []u8 = "";
@@ -48,33 +48,50 @@ fn decode_slice(data: []u8, reader: BitReader) !void {
 
 fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     var splitter = NALSplitter.init(allocator, h.raw_nal_buffer.items);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    // var current_pps: ?pps_mod.PPS = null;
+    // var current_sps: ?sps_mod.SPS = null;
+
 
     while (try splitter.next(h)) |nal| {
         nal_count += 1;
 
-        const rbsp_data = try remove_emulation_prevention(allocator, nal.data[1..]);
-        defer allocator.free(rbsp_data);
+        const rbsp_data = try remove_emulation_prevention(aa, nal.data[1..]);
         var bit_reader = BitReader.init(rbsp_data);
         // 这个switch后续可能会用到，但是目前暂时不需要
         const type_name = naltype: switch (nal.nal_type) {
             // inline else => |tag| @tagName(tag),
             .H264_NAL_UNSPECIFIED => continue,
             .H264_NAL_SPS => {
-                const sps = try SPS.parse_sps(&bit_reader);
+                const sps = try sps_mod.SPS.parse_sps(&bit_reader);
+                h.sps_list[sps.seq_parameter_set_id] = sps;
                 std.debug.print("SPS: {any}\n", .{sps});
                 break :naltype "H264_NAL_SPS";
             },
             .H264_NAL_PPS => {
-                const pps = try PPS.parse_pps(&bit_reader);
+                const pps = try pps_mod.PPS.parse_pps(&bit_reader);
+                h.pps_list[pps.pic_parameter_set_id] = pps;
                 std.debug.print("PPS: {any}\n", .{pps});
                 break :naltype "H264_NAL_PPS";
             },
             .H264_NAL_SEI => {
-                try decode_slice(rbsp_data, bit_reader); // SEI 信息的解码
+                try decode_slice_data(rbsp_data, bit_reader); // SEI 信息的解码
                 break :naltype "H264_NAL_SEI";
             },
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
-                try decode_slice(rbsp_data, bit_reader); // 非 IDR 图像的编码条带
+                const slice_header = try slice_mod.SliceHeader.parse_slice_header(&bit_reader, nal.nal_type, h.sps_list, h.pps_list);
+                if (slice_header.first_mb_in_slice == 0) {
+                    // 输出上一帧AVFrame
+                    if (nal.nal_type == .H264_NAL_IDR_SLICE) {
+                        //TODO: IDR帧: 清空所有参考帧
+                    }
+                    // 按照新SPS重新分配帧缓存
+                    // begin_new_picture
+                }
+                std.debug.print("Slice_header: {any}\n", .{slice_header});
+                try decode_slice_data(rbsp_data, bit_reader); // 非 IDR 图像的编码条带
                 break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
             },
             else => @tagName(nal.nal_type),
@@ -109,10 +126,11 @@ export fn my_zigh264(
             return -1;
         };
         h.* = ZigH264Context{
+            .allocator = std.heap.c_allocator,
             .width = 0,
             .height = 0,
-            .sps_list = .{ .items = &.{}, .capacity = 0 },
-            .pps_list = .{ .items = &.{}, .capacity = 0 },
+            .sps_list = [_]?sps_mod.SPS{null} ** 32,
+            .pps_list= [_]?pps_mod.PPS{null} ** 256,
             .nals = std.ArrayList(NALUnit).initCapacity(std.heap.c_allocator, 10) catch |e| {
                 std.debug.print("{any}\n", .{e});
                 return -1;
@@ -152,7 +170,8 @@ export fn my_zigh264(
 
     // std.debug.print("ZigH264Context h: {any}\n", .{h});
 
-    h.raw_nal_buffer.appendSlice(std.heap.c_allocator, data_slice) catch |err| {
+    //FIX:  这个地方，数据会不断增长，可能内存泄漏
+    h.raw_nal_buffer.appendSlice(h.allocator, data_slice) catch |err| {
         std.debug.print("Error allocator memory: {any}\n", .{err});
         return -1;
     };
@@ -161,7 +180,7 @@ export fn my_zigh264(
     // 有必要删除之前的data吗?担心性能不够
 
     // 暂时不做switch
-    split_nals(std.heap.c_allocator, h) catch |err| {
+    split_nals(h.allocator, h) catch |err| {
         std.debug.print("Error splitting NAL units: {any}\n", .{err});
     };
     // const nals = switch (data_slice[0]) {

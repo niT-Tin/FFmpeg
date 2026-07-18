@@ -9,6 +9,8 @@ pub const NALError = error{
     InvalidData,
     OutOfMemory,
     FMONotSupported,
+    PPSNotFound,
+    SPSNotFound,
 };
 
 pub const NALType = enum(u5) {

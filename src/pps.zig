@@ -2,7 +2,7 @@ const BitReader = @import("bit_reader.zig").BitReader;
 const expGolomb = @import("exp_golomb.zig");
 const NALError = @import("types.zig").NALError;
 
-const PPS = struct {
+pub const PPS = struct {
     // ===== 核心字段（必定存在） =====
     pic_parameter_set_id: u32, // ue(v)  范围 0~255
     seq_parameter_set_id: u32, // ue(v)  范围 0~31
@@ -56,29 +56,29 @@ const PPS = struct {
             .redundant_pic_cnt_present_flag = false,
         };
     }
-};
 
-pub fn parse_pps(bit_reader: *BitReader) !PPS {
-    var pps = PPS.init();
-    pps.pic_parameter_set_id = try expGolomb.read_ue(bit_reader);
-    pps.seq_parameter_set_id = try expGolomb.read_ue(bit_reader);
-    pps.entropy_coding_mode_flag = try bit_reader.next_bit() != 0;
-    pps.pic_order_present_flag = try bit_reader.next_bit() != 0;
-    pps.num_slice_groups_minus1 = try expGolomb.read_ue(bit_reader);
-    if (pps.num_slice_groups_minus1 > 0) {
-        return NALError.FMONotSupported;
+    pub fn parse_pps(pps_bit_reader: *BitReader) !PPS {
+        var pps = PPS.init();
+        pps.pic_parameter_set_id = try expGolomb.read_ue(pps_bit_reader);
+        pps.seq_parameter_set_id = try expGolomb.read_ue(pps_bit_reader);
+        pps.entropy_coding_mode_flag = try pps_bit_reader.next_bit() != 0;
+        pps.pic_order_present_flag = try pps_bit_reader.next_bit() != 0;
+        pps.num_slice_groups_minus1 = try expGolomb.read_ue(pps_bit_reader);
+        if (pps.num_slice_groups_minus1 > 0) {
+            return NALError.FMONotSupported;
+        }
+        pps.num_ref_idx_l0_active_minus1 = try expGolomb.read_ue(pps_bit_reader);
+        pps.num_ref_idx_l1_active_minus1 = try expGolomb.read_ue(pps_bit_reader);
+        pps.weighted_pred_flag = try pps_bit_reader.next_bit() != 0;
+        pps.weighted_bipred_idc = @intCast(try pps_bit_reader.next_bits(2));
+
+        pps.pic_init_qp_minus26 = try expGolomb.read_se(pps_bit_reader);
+        pps.pic_init_qs_minus26 = try expGolomb.read_se(pps_bit_reader);
+        pps.chroma_qp_index_offset = try expGolomb.read_se(pps_bit_reader);
+
+        pps.deblocking_filter_control_present_flag = try pps_bit_reader.next_bit() != 0;
+        pps.constrained_intra_pred_flag = try pps_bit_reader.next_bit() != 0;
+        pps.redundant_pic_cnt_present_flag = try pps_bit_reader.next_bit() != 0;
+        return pps;
     }
-    pps.num_ref_idx_l0_active_minus1 = try expGolomb.read_ue(bit_reader);
-    pps.num_ref_idx_l1_active_minus1 = try expGolomb.read_ue(bit_reader);
-    pps.weighted_pred_flag = try bit_reader.next_bit() != 0;
-    pps.weighted_bipred_idc = @intCast(try bit_reader.next_bits(2));
-
-    pps.pic_init_qp_minus26 = try expGolomb.read_se(bit_reader);
-    pps.pic_init_qs_minus26 = try expGolomb.read_se(bit_reader);
-    pps.chroma_qp_index_offset = try expGolomb.read_se(bit_reader);
-
-    pps.deblocking_filter_control_present_flag = try bit_reader.next_bit() != 0;
-    pps.constrained_intra_pred_flag = try bit_reader.next_bit() != 0;
-    pps.redundant_pic_cnt_present_flag = try bit_reader.next_bit() != 0;
-    return pps;
-}
+};
