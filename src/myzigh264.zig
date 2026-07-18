@@ -67,13 +67,13 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
             .H264_NAL_SPS => {
                 const sps = try sps_mod.SPS.parse_sps(&bit_reader);
                 h.sps_list[sps.seq_parameter_set_id] = sps;
-                std.debug.print("SPS: {any}\n", .{sps});
+                // std.debug.print("SPS: {any}\n", .{sps});
                 break :naltype "H264_NAL_SPS";
             },
             .H264_NAL_PPS => {
                 const pps = try pps_mod.PPS.parse_pps(&bit_reader);
                 h.pps_list[pps.pic_parameter_set_id] = pps;
-                std.debug.print("PPS: {any}\n", .{pps});
+                // std.debug.print("PPS: {any}\n", .{pps});
                 break :naltype "H264_NAL_PPS";
             },
             .H264_NAL_SEI => {
@@ -81,7 +81,8 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
                 break :naltype "H264_NAL_SEI";
             },
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
-                const slice_header = try slice_mod.SliceHeader.parse_slice_header(&bit_reader, nal.nal_type, h.sps_list, h.pps_list);
+                const nal_ref_idc: u2 = @intCast((nal.data[0] >> 5) & 3);
+                const slice_header = try slice_mod.SliceHeader.parse_slice_header(&bit_reader, nal.nal_type, nal_ref_idc, h.sps_list, h.pps_list);
                 if (slice_header.first_mb_in_slice == 0) {
                     // 输出上一帧AVFrame
                     if (nal.nal_type == .H264_NAL_IDR_SLICE) {
