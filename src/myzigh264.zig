@@ -38,7 +38,7 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     return allocator.realloc(dst, di);
 }
 
-fn decode_slice_data(data: []u8, reader: BitReader) !void {
+fn decode_slice_data(data: []u8, reader: *BitReader) !void {
     _ = data;
     _ = reader;
     // const result: []u8 = "";
@@ -77,7 +77,7 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
                 break :naltype "H264_NAL_PPS";
             },
             .H264_NAL_SEI => {
-                try decode_slice_data(rbsp_data, bit_reader); // SEI 信息的解码
+                // try decode_slice_data(rbsp_data, &bit_reader); // SEI 信息的解码
                 break :naltype "H264_NAL_SEI";
             },
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
