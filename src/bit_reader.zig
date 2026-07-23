@@ -7,39 +7,32 @@ const BitReadError = error{
 
 pub const BitReader = struct {
     buf: []const u8,
-    u8_read_pos: u8,
-    // FIXME: 如果只是解码NAL,在FFmpeg中，应该没问题，但是如果到更广泛的情况下
-    // u32可能会溢出，需要考虑另一种形式的实现。
-    buf_read_pos: u32, // 每u8_read_pos到1之后，增加1，往后移动一个byte
+    bit_pos: u3,
+    byte_pos: usize, // 每u8_read_pos到1之后，增加1，往后移动一个byte
     pub fn init(buf: []const u8) BitReader {
         return .{
             .buf = buf,
-            .u8_read_pos = 0x80, // 1000 0000
-            .buf_read_pos = 0,
+            .bit_pos = 0,
+            .byte_pos = 0,
         };
     }
 
     pub fn peek(self: BitReader) !u1 {
-        if (self.buf_read_pos >= self.buf.len) {
+        if (self.byte_pos >= self.buf.len) {
             return BitReadError.BufEmpty;
         }
-        return @truncate((self.buf[self.buf_read_pos] & self.u8_read_pos) >> @intCast(@ctz(self.u8_read_pos)));
+        return @intCast((self.buf[self.byte_pos] >> (7 - self.bit_pos)) & 1);
+        // return @truncate((self.buf[self.byte_pos] & self.bit_pos) >> @intCast(@ctz(self.bit_pos)));
     }
 
     pub fn next_bit(self: *BitReader) !u1 {
-        if (self.buf_read_pos >= self.buf.len) {
+        if (self.byte_pos >= self.buf.len) {
             return BitReadError.BufEmpty;
         }
-        // 正常情况
-        const result: u1 = @truncate((self.buf[self.buf_read_pos] & self.u8_read_pos) >> @intCast(@ctz(self.u8_read_pos)));
-        if (self.u8_read_pos == 0x01) {
-            // reset bits
-            self.u8_read_pos = 0x80;
-            self.buf_read_pos += 1;
-        } else {
-            self.u8_read_pos = self.u8_read_pos >> 1;
-        }
-        return result;
+        const bit = try self.peek();
+        self.bit_pos +%= 1;
+        if (self.bit_pos == 0) self.byte_pos += 1;
+        return bit;
     }
 
     pub fn next_bits(self: *BitReader, num: usize) !u32 {
