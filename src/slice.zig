@@ -158,8 +158,8 @@ pub const SliceHeader = struct {
             if (pps.entropy_coding_mode_flag) {
                 sh.cabac_init_idc = try expGolomb.read_ue(br);
             }
-            sh.slice_qp_delta = try expGolomb.read_se(br);
         }
+        sh.slice_qp_delta = try expGolomb.read_se(br);
 
         // 13. deblocking filter
         if (pps.deblocking_filter_control_present_flag) {

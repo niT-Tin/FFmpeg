@@ -8,8 +8,6 @@ const pps_mod = @import("pps.zig");
 const slice_mod = @import("slice.zig");
 const NALUnit = @import("types.zig").NALUnit;
 
-var nal_count: usize = 0;
-
 const FFmpeg = @import("ffmpeg");
 
 
@@ -39,6 +37,8 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
 }
 
 fn decode_slice_data(data: []u8, reader: *BitReader) !void {
+    var codIRange = 510;
+    var codIOffset = try reader.next_bits(9);
     _ = data;
     _ = reader;
     // const result: []u8 = "";
@@ -56,7 +56,7 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
 
 
     while (try splitter.next(h)) |nal| {
-        nal_count += 1;
+        h.nal_count += 1;
 
         const rbsp_data = try remove_emulation_prevention(aa, nal.data[1..]);
         var bit_reader = BitReader.init(rbsp_data);
@@ -83,6 +83,8 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
                 const nal_ref_idc: u2 = @intCast((nal.data[0] >> 5) & 3);
                 const slice_header = try slice_mod.SliceHeader.parse_slice_header(&bit_reader, nal.nal_type, nal_ref_idc, h.sps_list, h.pps_list);
+                // 初始化算术解码引擎
+                // 初始化上下文变量表
                 if (slice_header.first_mb_in_slice == 0) {
                     // 输出上一帧AVFrame
                     if (nal.nal_type == .H264_NAL_IDR_SLICE) {
@@ -92,7 +94,7 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
                     // begin_new_picture
                 }
                 std.debug.print("Slice_header: {any}\n", .{slice_header});
-                try decode_slice_data(rbsp_data, bit_reader); // 非 IDR 图像的编码条带
+                try decode_slice_data(rbsp_data, &bit_reader); // 非 IDR 图像的编码条带
                 break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
             },
             else => @tagName(nal.nal_type),
@@ -102,12 +104,12 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
         //     return err;
         // };
         if (!std.mem.eql(u8, type_name, "H264_NAL_SLICE,H264_NAL_IDR_SLICE")) {
-            std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ nal_count, type_name, nal.data.len, nal.start_code_len });
+            std.debug.print("  NAL {d}: type={s}, size={d} bytes, start_code_len={d}\n", .{ h.nal_count, type_name, nal.data.len, nal.start_code_len });
         }
     } else {
         return;
     }
-    std.debug.print("共找到 {d} 个 NAL 单元\n", .{nal_count});
+    std.debug.print("共找到 {d} 个 NAL 单元\n", .{h.nal_count});
 
     // return TypeError.NotMaintainedType;
 }
@@ -141,6 +143,7 @@ export fn my_zigh264(
                 return -1;
             },
             .read_pos = 0,
+            .nal_count = 0,
         };
         ctx.?.priv_data = h;
     }

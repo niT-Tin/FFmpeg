@@ -13,4 +13,5 @@ pub const ZigH264Context = struct {
     // nal data
     raw_nal_buffer: std.ArrayList(u8),
     read_pos: usize,
+    nal_count: usize = 0,
 };
