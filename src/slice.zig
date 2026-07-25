@@ -4,6 +4,7 @@ const sps_mod = @import("sps.zig");
 const pps_mod = @import("pps.zig");
 const expGolomb = @import("exp_golomb.zig");
 const NALError = @import("types.zig").NALError;
+const std = @import("std");
 
 //TODO: 如果后续需要这些字段，其实可以删除
 fn skip_ref_pic_list_modification(br: *BitReader, is_b: bool) !void {
@@ -45,11 +46,32 @@ fn skip_dec_ref_pic_marking(br: *BitReader, nal_type: NALType) !void {
     }
 }
 
+// 运行时动态计算
+pub const StateContext = struct {
+    p_state_idx: u6,
+    val_mps: u1,
+
+    // 根据默认m/n 以及slice初始化动态context
+    pub fn init(m: i8, n: i8, slice_qp_y: i32) StateContext {
+        const qp = std.math.clamp(slice_qp_y, 0, 51);
+        const pre = std.math.clamp(((m * qp) >> 4) + n, 1, 126);
+
+        if (pre <= 63) {
+            return .{
+                .p_state_idx = @intCast(63 - pre),
+                .val_mps = 0,
+            };
+        } else {
+            return .{ .p_state_idx = @intCast(pre - 63), .val_mps = 1 };
+        }
+    }
+};
+
 pub const SliceContext = struct {
     slice_type: u32,
     // cabac
     cabac_init_idc: u32,
-    cabac_state: [1024]u8,
+    cabac_state: [1024]StateContext,
 };
 
 pub const SliceHeader = struct {
