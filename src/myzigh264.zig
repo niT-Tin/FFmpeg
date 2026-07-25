@@ -37,8 +37,8 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
 }
 
 fn decode_slice_data(data: []u8, reader: *BitReader) !void {
-    var codIRange = 510;
-    var codIOffset = try reader.next_bits(9);
+    // var codIRange = 510;
+    // var codIOffset = try reader.next_bits(9);
     _ = data;
     _ = reader;
     // const result: []u8 = "";

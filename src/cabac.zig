@@ -1128,6 +1128,11 @@ pub const h264_cabac_tables: [512 + 4 * 2 * 64 + 4 * 64 + 63]u8 = .{
     5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8,
 };
 
+
+// fn init_cabac_stats(sl: *Slice, ctx: *ZigH264Conext) !void {
+//     var context_init: ?*ContextInit = undefined;
+// }
+
 // 运行时动态计算
 pub const Context = struct {
     p_state_idx: u6,
@@ -1137,6 +1142,7 @@ pub const Context = struct {
 pub const ACEngine = struct {
 
     pub fn decode_decision(ctx_idx: usize) !u1 {
+        _ = ctx_idx;
         // context
         // cod_i_range_lps = rangeTabLSP[p_state_idx][q_code_i_range_idx]
         // code_i_range = code_i_range - cod_i_range_lps // mps区间

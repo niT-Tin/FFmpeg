@@ -45,6 +45,13 @@ fn skip_dec_ref_pic_marking(br: *BitReader, nal_type: NALType) !void {
     }
 }
 
+pub const SliceContext = struct {
+    slice_type: u32,
+    // cabac
+    cabac_init_idc: u32,
+    cabac_state: [1024]u8,
+};
+
 pub const SliceHeader = struct {
     first_mb_in_slice: u32, // ue(v) 判断是否新帧
     slice_type: u32, // ue(v) I/P/B 决定编码路径
