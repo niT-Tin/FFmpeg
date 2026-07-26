@@ -1,4 +1,5 @@
-const BitReader = @import("bit_reader").BitReader;
+const std = @import("std");
+const BitReader = @import("bit_reader.zig").BitReader;
 const slice_mod = @import("slice.zig");
 // 初始化概率状态
 pub const ContextInit = struct {
@@ -1050,34 +1051,34 @@ pub const range_tab_lps: [64][4]u8 = .{
     .{ 128, 158, 187, 216 }, .{ 123, 150, 178, 205 },
     .{ 116, 142, 169, 195 }, .{ 111, 135, 160, 185 },
     .{ 105, 128, 152, 175 }, .{ 100, 122, 144, 166 },
-    .{  95, 116, 137, 158 }, .{  90, 110, 130, 150 },
-    .{  85, 104, 123, 142 }, .{  81,  99, 117, 135 },
-    .{  77,  94, 111, 128 }, .{  73,  89, 105, 122 },
-    .{  69,  85, 100, 116 }, .{  66,  80,  95, 110 },
-    .{  62,  76,  90, 104 }, .{  59,  72,  86,  99 },
-    .{  56,  69,  81,  94 }, .{  53,  65,  77,  89 },
-    .{  51,  62,  73,  85 }, .{  48,  59,  69,  80 },
-    .{  46,  56,  66,  76 }, .{  43,  53,  63,  72 },
-    .{  41,  50,  59,  69 }, .{  39,  48,  56,  65 },
-    .{  37,  45,  54,  62 }, .{  35,  43,  51,  59 },
-    .{  33,  41,  48,  56 }, .{  32,  39,  46,  53 },
-    .{  30,  37,  43,  50 }, .{  29,  35,  41,  48 },
-    .{  27,  33,  39,  45 }, .{  26,  31,  37,  43 },
-    .{  24,  30,  35,  41 }, .{  23,  28,  33,  39 },
-    .{  22,  27,  32,  37 }, .{  21,  26,  30,  35 },
-    .{  20,  24,  29,  33 }, .{  19,  23,  27,  31 },
-    .{  18,  22,  26,  30 }, .{  17,  21,  25,  28 },
-    .{  16,  20,  23,  27 }, .{  15,  19,  22,  25 },
-    .{  14,  18,  21,  24 }, .{  14,  17,  20,  23 },
-    .{  13,  16,  19,  22 }, .{  12,  15,  18,  21 },
-    .{  12,  14,  17,  20 }, .{  11,  14,  16,  19 },
-    .{  11,  13,  15,  18 }, .{  10,  12,  15,  17 },
-    .{  10,  12,  14,  16 }, .{   9,  11,  13,  15 },
-    .{   9,  11,  12,  14 }, .{   8,  10,  12,  14 },
-    .{   8,   9,  11,  13 }, .{   7,   9,  11,  12 },
-    .{   7,   9,  10,  12 }, .{   7,   8,  10,  11 },
-    .{   6,   8,   9,  11 }, .{   6,   7,   9,  10 },
-    .{   6,   7,   8,   9 }, .{   2,   2,   2,   2 },
+    .{ 95, 116, 137, 158 },  .{ 90, 110, 130, 150 },
+    .{ 85, 104, 123, 142 },  .{ 81, 99, 117, 135 },
+    .{ 77, 94, 111, 128 },   .{ 73, 89, 105, 122 },
+    .{ 69, 85, 100, 116 },   .{ 66, 80, 95, 110 },
+    .{ 62, 76, 90, 104 },    .{ 59, 72, 86, 99 },
+    .{ 56, 69, 81, 94 },     .{ 53, 65, 77, 89 },
+    .{ 51, 62, 73, 85 },     .{ 48, 59, 69, 80 },
+    .{ 46, 56, 66, 76 },     .{ 43, 53, 63, 72 },
+    .{ 41, 50, 59, 69 },     .{ 39, 48, 56, 65 },
+    .{ 37, 45, 54, 62 },     .{ 35, 43, 51, 59 },
+    .{ 33, 41, 48, 56 },     .{ 32, 39, 46, 53 },
+    .{ 30, 37, 43, 50 },     .{ 29, 35, 41, 48 },
+    .{ 27, 33, 39, 45 },     .{ 26, 31, 37, 43 },
+    .{ 24, 30, 35, 41 },     .{ 23, 28, 33, 39 },
+    .{ 22, 27, 32, 37 },     .{ 21, 26, 30, 35 },
+    .{ 20, 24, 29, 33 },     .{ 19, 23, 27, 31 },
+    .{ 18, 22, 26, 30 },     .{ 17, 21, 25, 28 },
+    .{ 16, 20, 23, 27 },     .{ 15, 19, 22, 25 },
+    .{ 14, 18, 21, 24 },     .{ 14, 17, 20, 23 },
+    .{ 13, 16, 19, 22 },     .{ 12, 15, 18, 21 },
+    .{ 12, 14, 17, 20 },     .{ 11, 14, 16, 19 },
+    .{ 11, 13, 15, 18 },     .{ 10, 12, 15, 17 },
+    .{ 10, 12, 14, 16 },     .{ 9, 11, 13, 15 },
+    .{ 9, 11, 12, 14 },      .{ 8, 10, 12, 14 },
+    .{ 8, 9, 11, 13 },       .{ 7, 9, 11, 12 },
+    .{ 7, 9, 10, 12 },       .{ 7, 8, 10, 11 },
+    .{ 6, 8, 9, 11 },        .{ 6, 7, 9, 10 },
+    .{ 6, 7, 8, 9 },         .{ 2, 2, 2, 2 },
 };
 
 // last_significant_coeff_flag 在 8x8 变换块中的 ctxIdx 偏移表 (扫描位置 -> 上下文组)
@@ -1105,6 +1106,11 @@ pub const trans_idx_lps: [64]u8 = .{
 // renorm 一次移位表: norm_shift[codIRange] = 使 codIRange << n >= 256 的最小 n
 // 等价于前导零计数 (@clz), 用来替代规范中逐位的 while (codIRange < 256) 循环
 // (FFmpeg ff_h264_norm_shift)
+// 因为code_I_range最大为510,也就是只需要9个bit, 256(u16)为 0000 0001 0000 0000
+// 设当前range最高有效位在p位(0开始), 左移动n位后需要数值 >= 256
+// @clz为当前数有效位的前导0 即 @clz(u16) = 15 - p;
+// 也就是 p + n >= 8; n >= 8 - p; (目标求出n 也就是 8 - p)
+// 因为@clz(u16) = 15 - p; 所以 n >= @clz(u64) - 7;
 pub const norm_shift: [512]u8 = blk: {
     var table: [512]u8 = undefined;
     for (&table, 0..) |*v, i| {
@@ -1116,49 +1122,216 @@ pub const norm_shift: [512]u8 = blk: {
 pub const CABACEngine = struct {
     code_I_range: u32,
     code_I_offset: u32,
-    context: *[1024]slice_mod.StateContext,
+    context: [1024]slice_mod.StateContext,
     bit_reader: *BitReader,
 
     pub fn init(
-        // cabac_state: *[1024]slice_mod.StateContext,
         slice_type: u32,
         cabac_init_idc: u32,
         slice_qp_y: i32,
         bit_reader: *BitReader,
-    ) CABACEngine {
-        const code_I_range: u32 = 510;
-        const code_I_offset: u32 = bit_reader.next_bits(9);
+    ) !CABACEngine {
+        var self: CABACEngine = .{
+            .code_I_range = 510,
+            .code_I_offset = try bit_reader.next_bits(9),
+            .context = undefined,
+            .bit_reader = bit_reader,
+        };
         const table: *const [1024]ContextInit = if (slice_type % 5 == 2)
             &cabac_context_init_I
         else
             &cabac_context_init_PB[cabac_init_idc];
 
-        for (0..1024) |i| {
-            table[i] = slice_mod.StateContext.init(table[i].m, table[i].n, slice_qp_y);
+        for (&self.context, table) |*c, ci| {
+            c.* = slice_mod.StateContext.init(ci.m, ci.n, slice_qp_y);
         }
-        return .{
-            .code_I_range = code_I_range,
-            .code_I_offset = code_I_offset,
-            .context = table,
-            .bit_reader = bit_reader,
-        };
+        return self;
     }
 
-    pub fn decode_decision() !u1 {
-        // context
-        // cod_i_range_lps = rangeTabLSP[p_state_idx][q_code_i_range_idx]
-        // code_i_range = code_i_range - cod_i_range_lps // mps区间
-        // if (offset >= cod_i_range) { // lps区间
-        //     bin = 1 - mps;
-        //     offset -= code_i_range // 移动左端点
-        //     code_i_range = code_i_range_lps // 更新区间
-        // } else {
-        //     bin = mps;
+    // ctx_id = ctx_idx_offset + ctx_idx_inc
+    //
+    // ctx_idx_offset 通过查询表格得到 Table 9-11
+    //
+    // eg: mb_skip_flag(p/sp)           --- 11
+    //     mb_type (I slice)            --- 3
+    //     coded_block_pattern (luma)   --- 77
+    //
+    // ctx_idx_inc --- 分两种情况
+    // 1. 依赖相邻宏块
+    // condTermA = 宏块A可用且满足条件 ? 1 : 0
+    // condTermB = 宏块B可用且满足条件 ? 1 : 0
+    // ctx_idx_inc = condTermA + 2 * condTermB // 取 0..3
+    // 2. 等于bin_idx
+    // 语法元素按照一元码/截断码展开成多个bin后，第几个bin就用第几个上下文
+    // 3. 0, 有些语法元素只有一个上下文
+    pub fn decode_decision(self: *CABACEngine, ctx_id: u16) !u1 {
+        const q_code_i_range_idx = (self.code_I_range >> 6) & 3;
+        const ctx = &self.context[ctx_id];
+        const code_I_range_lps = range_tab_lps[ctx.p_state_idx][q_code_i_range_idx]; // lps区间
+        self.code_I_range -= code_I_range_lps; // mps区间
+        var bin: u1 = undefined;
+        // 算术编码部分
+        if (self.code_I_offset >= self.code_I_range) {
+            // 移动左端点
+            self.code_I_offset -= self.code_I_range;
+            // 更新区间
+            self.code_I_range = code_I_range_lps;
+            bin = 1 - ctx.val_mps;
+        } else {
+            // 之前code_I_range已经为mps了, 已经做了更新
+            bin = ctx.val_mps;
+        }
+
+        // 更新上下文概率
+        if (bin == ctx.val_mps) { // mps, mps的概率更大, 也就是概率阶梯更高
+            ctx.p_state_idx = @min(ctx.p_state_idx +| 1, 63);
+        } else { // lps, lps概率更大
+            if (ctx.p_state_idx == 0) { // 阶梯为0,最不确定
+                ctx.val_mps = 1 - ctx.val_mps; // 反转mps符号
+            }
+            ctx.p_state_idx = @intCast(trans_idx_lps[ctx.p_state_idx]);
+        }
+
+        // 重归一化，提高区间精度, 常规操作放在这，取巧的方案就是提前计算好需要shift多少位
+        // while (self.code_I_range < 256) {
+        //   self.code_I_range <<= 1;
+        //   self.code_I_offset = (self.code_I_offset << 1) | self.bit_reader.next_bit();
         // }
+        const n: u5 = @intCast(norm_shift[self.code_I_range]);
+        self.code_I_range <<= n;
+        self.code_I_offset = (self.code_I_offset << n) | try self.bit_reader.next_bits(n);
+        return bin;
     }
 
-    pub fn decode_bypass() !u1 {}
+    //50/50, 不需要查context
+    pub fn decode_bypass(self: *CABACEngine) !u1 {
+        self.code_I_offset = (self.code_I_offset << 1) | try self.bit_reader.next_bit();
+        if (self.code_I_offset >= self.code_I_range) {
+            self.code_I_offset -= self.code_I_range;
+            return 1;
+        } else {
+            return 0;
+        }
+    }
 
-    pub fn decode_terminate() !u1 {}
+    pub fn decode_terminate(self: *CABACEngine) !u1 {
+        self.code_I_range -= 2;
+        if (self.code_I_offset >= self.code_I_range) {
+            return 1;
+        } else {
+            const n: u5 = @intCast(norm_shift[self.code_I_range]);
+            self.code_I_range <<= n;
+            self.code_I_offset = (self.code_I_offset << n) | try self.bit_reader.next_bits(n);
+            return 0;
+        }
+    }
 };
 
+
+// ---- 测试辅助: 直接构造 engine (绕过 init 读 9 bit 的行为), 手工控制 range/offset/context ----
+fn testEngine(range: u32, offset: u32, p_state_idx: u6, val_mps: u1, br: *BitReader) CABACEngine {
+    var ctx_arr: [1024]slice_mod.StateContext = undefined;
+    ctx_arr[0] = .{ .p_state_idx = p_state_idx, .val_mps = val_mps };
+    return .{
+        .code_I_range = range,
+        .code_I_offset = offset,
+        .context = ctx_arr,
+        .bit_reader = br,
+    };
+}
+
+test "decode_decision MPS 路径: offset 落在 mps 区间, 状态向 63 爬升" {
+    // ctx: p_state_idx=0, val_mps=0; range=510 -> q_idx=3, lps=240, mps区间=270
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, 0, 0, &br);
+    const bin = try engine.decode_decision(0);
+    // offset=100 < 270 -> bin = val_mps = 0
+    try std.testing.expectEqual(0, bin);
+    try std.testing.expectEqual(270, engine.code_I_range);
+    try std.testing.expectEqual(100, engine.code_I_offset); // norm_shift[270]=0, 不 renorm
+    // MPS 命中: p_state_idx 0 -> 1, val_mps 不变
+    try std.testing.expectEqual(1, engine.context[0].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[0].val_mps);
+}
+
+test "decode_decision LPS 路径: offset 落在 lps 区间, 状态翻转并 renorm" {
+    // 同上, 但 offset=300 >= 270 -> LPS
+    // 码流第一个 bit 为 1, renorm 时应被补进 offset 低位
+    const data = [1]u8{0b1000_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 300, 0, 0, &br);
+    const bin = try engine.decode_decision(0);
+    try std.testing.expectEqual(1, bin); // 1 - val_mps
+    // renorm: norm_shift[240]=1 -> range=480, offset=(300-270)<<1 | 1 = 61
+    try std.testing.expectEqual(480, engine.code_I_range);
+    try std.testing.expectEqual(61, engine.code_I_offset);
+    // LPS 命中且 p_state_idx==0: val_mps 翻转, p_state_idx = trans_idx_lps[0] = 0
+    try std.testing.expectEqual(0, engine.context[0].p_state_idx);
+    try std.testing.expectEqual(1, engine.context[0].val_mps);
+}
+
+test "decode_decision p_state_idx=63 时 MPS 命中不溢出" {
+    // range=510, q_idx=3, lps=range_tab_lps[63][3]=2, mps区间=508
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, 63, 1, &br);
+    const bin = try engine.decode_decision(0);
+    try std.testing.expectEqual(1, bin); // offset=0 < 508 -> bin = val_mps = 1
+    try std.testing.expectEqual(508, engine.code_I_range);
+    // 饱和: p_state_idx 保持 63
+    try std.testing.expectEqual(63, engine.context[0].p_state_idx);
+}
+
+test "decode_bypass: 等概率判决, 不碰 context, 不 renorm" {
+    // offset=100, 补 bit 1 -> 201 < 510 -> bin 0, range 不动
+    const data = [1]u8{0b1000_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, 0, 0, &br);
+    try std.testing.expectEqual(0, try engine.decode_bypass());
+    try std.testing.expectEqual(510, engine.code_I_range);
+    try std.testing.expectEqual(201, engine.code_I_offset);
+
+    // offset=300, 补 bit 1 -> 601 >= 510 -> bin 1, offset 减去 range
+    const data2 = [1]u8{0b1000_0000};
+    var br2 = BitReader.init(&data2);
+    var engine2 = testEngine(510, 300, 0, 0, &br2);
+    try std.testing.expectEqual(1, try engine2.decode_bypass());
+    try std.testing.expectEqual(510, engine2.code_I_range);
+    try std.testing.expectEqual(91, engine2.code_I_offset);
+}
+
+test "decode_terminate: 顶部 2 个值为结束窗口" {
+    // offset=509 >= 508 -> 结束, 不 renorm
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 509, 0, 0, &br);
+    try std.testing.expectEqual(1, try engine.decode_terminate());
+
+    // offset=0 < 508 -> 未结束, renorm 后 range 不变 (norm_shift[508]=0)
+    const data2 = [1]u8{0};
+    var br2 = BitReader.init(&data2);
+    var engine2 = testEngine(510, 0, 0, 0, &br2);
+    try std.testing.expectEqual(0, try engine2.decode_terminate());
+    try std.testing.expectEqual(508, engine2.code_I_range);
+
+    // range=256 -> 减 2 后 254 < 256, 必须 renorm: norm_shift[254]=1
+    const data3 = [1]u8{0b1000_0000};
+    var br3 = BitReader.init(&data3);
+    var engine3 = testEngine(256, 0, 0, 0, &br3);
+    try std.testing.expectEqual(0, try engine3.decode_terminate());
+    try std.testing.expectEqual(508, engine3.code_I_range); // 254 << 1
+    try std.testing.expectEqual(1, engine3.code_I_offset); // 0 << 1 | 1
+}
+
+test "init: I slice 上下文按 qp 初始化 (Table 9-12 第 0 项)" {
+    // cabac_context_init_I[0] = {m=20, n=-15}, slice_qp_y=26
+    // pre = ((20*26)>>4) - 15 = 32 - 15 = 17 <= 63 -> p_state_idx = 63-17 = 46, val_mps = 0
+    const data = [2]u8{ 0, 0 }; // init 先读 9 bit -> offset = 0
+    var br = BitReader.init(&data);
+    const engine = try CABACEngine.init(2, 0, 26, &br);
+    try std.testing.expectEqual(510, engine.code_I_range);
+    try std.testing.expectEqual(0, engine.code_I_offset);
+    try std.testing.expectEqual(46, engine.context[0].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[0].val_mps);
+}

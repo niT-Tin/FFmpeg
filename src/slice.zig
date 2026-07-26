@@ -71,7 +71,6 @@ pub const SliceContext = struct {
     slice_type: u32,
     // cabac
     cabac_init_idc: u32,
-    cabac_state: [1024]StateContext,
 };
 
 pub const SliceHeader = struct {
