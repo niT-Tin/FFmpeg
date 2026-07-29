@@ -1225,8 +1225,58 @@ pub const CABACEngine = struct {
             return 0;
         }
     }
-};
 
+    pub fn decode_unary(self: *CABACEngine, ctx_id: u16) !u32 {
+        var result: u32 = 0;
+        var bin = try self.decode_decision(ctx_id);
+        if (bin == 0) {
+            return result;
+        }
+        while (bin != 0) {
+            result += 1;
+            bin = try self.decode_decision(ctx_id);
+        }
+        return result;
+    }
+
+    pub fn decode_truncated_unary(self: *CABACEngine, ctx_id: u16, c_max: u32) !u32 {
+        var result: u32 = 0;
+        var bin = try self.decode_decision(ctx_id);
+        if (bin == 0) {
+            return result;
+        }
+        while (bin != 0) {
+            result += 1;
+            if (result == c_max) break;
+            bin = try self.decode_decision(ctx_id);
+        }
+        return result;
+    }
+
+    pub fn decode_fixed_length(self: *CABACEngine, c_max: u32, ctx_id: u16) !u32 {
+      const n = 32 - @clz(c_max);
+      var result: u32 = 0;
+      for (0..n) |_| {
+        result = (result << 1) | try self.decode_decision(ctx_id);
+      }
+      return result;
+    }
+
+    pub fn decode_uegk(self: *CABACEngine, ctx_id: u16, k: u32) !u32 {
+      var leadingZeroBits: usize = 0;
+      while(true) {
+        const bit = try self.decode_decision(ctx_id);
+        if (bit == 1) break;
+        leadingZeroBits += 1;
+      }
+      var suf: u32 = 0;
+      for (0..leadingZeroBits + k) |_| {
+        suf = (suf << 1) | try self.decode_decision(ctx_id);
+      }
+      return ((@as(u32, 1) << @intCast(leadingZeroBits)) - 1) + (suf >> @intCast(k));
+
+    }
+};
 
 // ---- 测试辅助: 直接构造 engine (绕过 init 读 9 bit 的行为), 手工控制 range/offset/context ----
 fn testEngine(range: u32, offset: u32, p_state_idx: u6, val_mps: u1, br: *BitReader) CABACEngine {
@@ -1334,4 +1384,92 @@ test "init: I slice 上下文按 qp 初始化 (Table 9-12 第 0 项)" {
     try std.testing.expectEqual(0, engine.code_I_offset);
     try std.testing.expectEqual(46, engine.context[0].p_state_idx);
     try std.testing.expectEqual(0, engine.context[0].val_mps);
+}
+
+
+test "decode_unary: 值 2 (bin 串 1,1,0)" {
+    // 手工推演 (ctx p=0, val_mps=0, range=510, offset=350, 码流全 0):
+    // bin1: q=3,lps=240,mps=270; 350>=270 -> LPS -> bin=1; val_mps->1, p=0
+    //       offset=80, range=240 -> renorm n=1 -> range=480, offset=160
+    // bin2: q=3,lps=240,mps=240; 160<240 -> MPS -> bin=val_mps=1; p=0->1
+    //       range=240 -> renorm -> range=480, offset=320
+    // bin3: p=1,q=3,lps=227,mps=253; 320>=253 -> LPS -> bin=1-1=0 -> 停止
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 350, 0, 0, &br);
+    try std.testing.expectEqual(2, try engine.decode_unary(0));
+}
+
+test "decode_unary: 值 0 (首个 bin 即 0)" {
+    // offset=100 < 270 -> 首 bin = val_mps = 0 -> 直接返回 0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, 0, 0, &br);
+    try std.testing.expectEqual(0, try engine.decode_unary(0));
+}
+
+test "decode_truncated_unary: 值达到 c_max 时不得多消耗 bin" {
+    // 与 unary=2 场景相同, 但 c_max=2: 正确实现解 2 个 bin 后停止
+    // (offset=350 场景: bin1=1, bin2=1, 见上一条测试的推演)
+    // 若实现有 off-by-one 多解第 3 个 bin, 下面的 range/p_state_idx 断言会失败
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 350, 0, 0, &br);
+    try std.testing.expectEqual(2, try engine.decode_truncated_unary(0, 2));
+    try std.testing.expectEqual(480, engine.code_I_range); // 只 renorm 了 2 次
+    try std.testing.expectEqual(320, engine.code_I_offset);
+    try std.testing.expectEqual(1, engine.context[0].p_state_idx); // bin2 是 MPS: p 0->1
+}
+
+test "decode_truncated_unary: 值 1 < c_max, 遇 0 正常停止" {
+    // offset=400: bin1: 400>=270 -> LPS -> bin=1; val_mps->1
+    //   offset=130, range=240 -> renorm -> range=480, offset=260
+    // bin2: mps=240; 260>=240 -> LPS -> bin=1-1=0 -> 停止, 值=1
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 400, 0, 0, &br);
+    try std.testing.expectEqual(1, try engine.decode_truncated_unary(0, 3));
+}
+
+test "decode_uegk k=0: 值 0 (首 bin=1)" {
+    // offset=350: 首 bin: 350>=270 -> LPS -> bin=1 -> 前缀 l=0, 无后缀
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 350, 0, 0, &br);
+    try std.testing.expectEqual(0, try engine.decode_uegk(0, 0));
+}
+
+test "decode_uegk k=0: 值 6 (前缀 001, 后缀 11)" {
+    // 值 6: l=2, 后缀 suf=0b11=3, 值 = (1<<2)-1 + 3 = 6
+    // 手工推演 (ctx p=0, val_mps=0, range=510, offset=141, 码流 0b1110_0000):
+    // bin1: mps=270; 141<270 -> MPS -> bin=0; p=0->1; range=270 (不 renorm)
+    // bin2: p=1,q=0,lps=128,mps=142; 141<142 -> MPS -> bin=0; p=1->2
+    //       range=142 -> renorm n=1 -> range=284, offset=282|1=283
+    // bin3: p=2,q=0,lps=128,mps=156; 283>=156 -> LPS -> bin=1 (前缀结束, l=2)
+    //       p=trans_idx_lps[2]=1; offset=127, range=128 -> renorm -> 256, offset=254|1=255
+    // bin4 (后缀1): p=1,q=0,lps=128,mps=128; 255>=128 -> LPS -> bin=1
+    //       p=trans_idx_lps[1]=0; offset=127, range=128 -> renorm -> 256, offset=254|1=255
+    // bin5 (后缀2): p=0,q=0,lps=128,mps=128; 255>=128 -> LPS -> bin=1
+    // 后缀应为移位拼接 (suf<<1)|bin = 3; 若实现是求和 (1+1=2) 则会错误返回 5
+    const data = [1]u8{0b1110_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 141, 0, 0, &br);
+    try std.testing.expectEqual(6, try engine.decode_uegk(0, 0));
+}
+
+
+test "decode_fixed_length: c_max=3 读 2 个 bin, MSB-first 拼值" {
+    // c_max=3 -> 位宽 n=2 (32-@clz(3)=2), 值域 0..3
+    // offset=400 场景 (与 truncated 值 1 相同): bin1=1, bin2=0 -> 值 = 0b10 = 2
+    // bin1: mps=270; 400>=270 -> LPS -> bin=1; val_mps 0->1
+    //   offset=130, range=240 -> renorm -> range=480, offset=260
+    // bin2: mps=240; 260>=240 -> LPS -> bin=1-1=0; val_mps 1->0
+    //   offset=20, range=240 -> renorm -> range=480, offset=40
+    // 若公式误用 32-@clz(c_max+1) 会多读 1 个 bin, 值和后续状态都会错
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 400, 0, 0, &br);
+    try std.testing.expectEqual(2, try engine.decode_fixed_length(3, 0));
+    try std.testing.expectEqual(480, engine.code_I_range); // 恰好消耗 2 个 bin
+    try std.testing.expectEqual(40, engine.code_I_offset);
 }
