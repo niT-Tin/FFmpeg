@@ -1,28 +1,35 @@
 const CABACEngine = @import("cabac.zig").CABACEngine;
 
-// I slice 的 mb_type 解码 (规范 Table 9-32 / 9-34, 值含义见 Table 7-11)
-// 解码树 (对齐 FFmpeg decode_cabac_intra_mb_type):
-//   bin0 (ctxIdx 3): 0 -> I_4x4 (mb_type 0)
-//   bin1: 走 decode_terminate (该 bin 的 ctxIdx = 276), 命中 -> I_PCM (mb_type 25)
-//   否则 I_16x16 家族, mb_type = 1 + 12*cbp_luma + 4*cbp_chroma + pred
-//   对应 Table 7-11 命名 I_16x16_{pred}_{chroma}_{luma}
-pub fn decode_mb_type_I(engine: *CABACEngine) !u32 {
-    const bin0 = try engine.decode_decision(3);
-    if (bin0 == 0) return 0; // I_4x4
-
-    if (try engine.decode_terminate() == 1) return 25; // I_PCM
-    // 注意: 返回 25 后调用方需做 pcm_alignment_zero_bit 字节对齐 + 裸 PCM 数据, 不走 CABAC
-
-    var mb_type: u32 = 1; // I_16x16
-    mb_type += 12 * @as(u32, try engine.decode_decision(4)); // cbp_luma != 0
-    if (try engine.decode_decision(5) == 1) { // cbp_chroma != 0
-        mb_type += 4 + 4 * @as(u32, try engine.decode_decision(5)); // 10 -> +4, 11 -> +8
+const CABACSyntax = struct {
+    engine: *CABACEngine,
+    pub fn init(e: *CABACEngine) CABACSyntax {
+        return .{
+            .engine = e,
+        };
     }
-    mb_type += 2 * @as(u32, try engine.decode_decision(6)); // intra16x16_pred_mode 高位
-    mb_type += 1 * @as(u32, try engine.decode_decision(6)); // intra16x16_pred_mode 低位
-    return mb_type;
-}
+    // I slice 的 mb_type 解码 (规范 Table 9-32 / 9-34, 值含义见 Table 7-11)
+    // 解码树 (对齐 FFmpeg decode_cabac_intra_mb_type):
+    //   bin0 (ctxIdx 3): 0 -> I_4x4 (mb_type 0)
+    //   bin1: 走 decode_terminate (该 bin 的 ctxIdx = 276), 命中 -> I_PCM (mb_type 25)
+    //   否则 I_16x16 家族, mb_type = 1 + 12*cbp_luma + 4*cbp_chroma + pred
+    //   对应 Table 7-11 命名 I_16x16_{pred}_{chroma}_{luma}
+    pub fn decode_mb_type_I(self: *CABACSyntax) !u32 {
+        const bin0 = try self.engine.decode_decision(3);
+        if (bin0 == 0) return 0; // I_4x4
 
+        if (try self.engine.decode_terminate() == 1) return 25; // I_PCM
+        // 注意: 返回 25 后调用方需做 pcm_alignment_zero_bit 字节对齐 + 裸 PCM 数据, 不走 CABAC
+
+        var mb_type: u32 = 1; // I_16x16
+        mb_type += 12 * @as(u32, try self.engine.decode_decision(4)); // cbp_luma != 0
+        if (try self.engine.decode_decision(5) == 1) { // cbp_chroma != 0
+            mb_type += 4 + 4 * @as(u32, try self.engine.decode_decision(5)); // 10 -> +4, 11 -> +8
+        }
+        mb_type += 2 * @as(u32, try self.engine.decode_decision(6)); // intra16x16_pred_mode 高位
+        mb_type += 1 * @as(u32, try self.engine.decode_decision(6)); // intra16x16_pred_mode 低位
+        return mb_type;
+    }
+};
 
 // ---- 测试辅助 ----
 const std = @import("std");
@@ -46,7 +53,8 @@ test "decode_mb_type_I: bin0=0 -> I_4x4 (mb_type 0)" {
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 100, &br);
-    try std.testing.expectEqual(0, try decode_mb_type_I(&engine));
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_mb_type_I());
 }
 
 test "decode_mb_type_I: bin0=1 后 terminate 命中 -> I_PCM (mb_type 25)" {
@@ -56,7 +64,8 @@ test "decode_mb_type_I: bin0=1 后 terminate 命中 -> I_PCM (mb_type 25)" {
     const data = [1]u8{0b1000_0000};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 510, &br);
-    try std.testing.expectEqual(25, try decode_mb_type_I(&engine));
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(25, try syntax.decode_mb_type_I());
 }
 
 test "decode_mb_type_I: I_16x16 全零 -> mb_type 1" {
@@ -71,7 +80,8 @@ test "decode_mb_type_I: I_16x16 全零 -> mb_type 1" {
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 280, &br);
-    try std.testing.expectEqual(1, try decode_mb_type_I(&engine));
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(1, try syntax.decode_mb_type_I());
 }
 
 test "decode_mb_type_I: cbp_luma=1 -> mb_type 13" {
@@ -86,5 +96,6 @@ test "decode_mb_type_I: cbp_luma=1 -> mb_type 13" {
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 400, &br);
-    try std.testing.expectEqual(13, try decode_mb_type_I(&engine));
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(13, try syntax.decode_mb_type_I());
 }
