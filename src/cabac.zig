@@ -1271,7 +1271,7 @@ pub const CABACEngine = struct {
       }
       var suf: u32 = 0;
       for (0..leadingZeroBits + k) |_| {
-        suf = (suf << 1) | try self.decode_decision(ctx_id);
+        suf = (suf << 1) | try self.decode_bypass();
       }
       return ((@as(u32, 1) << @intCast(leadingZeroBits)) - 1) + (suf >> @intCast(k));
 
@@ -1441,17 +1441,17 @@ test "decode_uegk k=0: 值 0 (首 bin=1)" {
 
 test "decode_uegk k=0: 值 6 (前缀 001, 后缀 11)" {
     // 值 6: l=2, 后缀 suf=0b11=3, 值 = (1<<2)-1 + 3 = 6
-    // 手工推演 (ctx p=0, val_mps=0, range=510, offset=141, 码流 0b1110_0000):
+    // 前缀走 decode_decision (ctx p=0, val_mps=0, range=510, offset=141, 码流 0b1111_0000):
     // bin1: mps=270; 141<270 -> MPS -> bin=0; p=0->1; range=270 (不 renorm)
     // bin2: p=1,q=0,lps=128,mps=142; 141<142 -> MPS -> bin=0; p=1->2
     //       range=142 -> renorm n=1 -> range=284, offset=282|1=283
     // bin3: p=2,q=0,lps=128,mps=156; 283>=156 -> LPS -> bin=1 (前缀结束, l=2)
     //       p=trans_idx_lps[2]=1; offset=127, range=128 -> renorm -> 256, offset=254|1=255
-    // bin4 (后缀1): p=1,q=0,lps=128,mps=128; 255>=128 -> LPS -> bin=1
-    //       p=trans_idx_lps[1]=0; offset=127, range=128 -> renorm -> 256, offset=254|1=255
-    // bin5 (后缀2): p=0,q=0,lps=128,mps=128; 255>=128 -> LPS -> bin=1
-    // 后缀应为移位拼接 (suf<<1)|bin = 3; 若实现是求和 (1+1=2) 则会错误返回 5
-    const data = [1]u8{0b1110_0000};
+    // 后缀走 decode_bypass (不查上下文, offset 左移补码流 bit, range 恒为 256):
+    // bin4: offset=(255<<1)|1=511 >= 256 -> bin=1, offset=511-256=255
+    // bin5: offset=(255<<1)|1=511 >= 256 -> bin=1, offset=255
+    // suf = (1<<1)|1 = 3
+    const data = [1]u8{0b1111_0000};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 141, 0, 0, &br);
     try std.testing.expectEqual(6, try engine.decode_uegk(0, 0));
