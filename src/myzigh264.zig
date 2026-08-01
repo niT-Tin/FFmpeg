@@ -7,9 +7,10 @@ const sps_mod = @import("sps.zig");
 const pps_mod = @import("pps.zig");
 const slice_mod = @import("slice.zig");
 const NALUnit = @import("types.zig").NALUnit;
+const CABACEngine = @import("cabac.zig").CABACEngine;
+const CABACSyntax = @import("cabac_syntax.zig").CABACSyntax;
 
 const FFmpeg = @import("ffmpeg");
-
 
 fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     var di: usize = 0;
@@ -54,7 +55,6 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     // var current_pps: ?pps_mod.PPS = null;
     // var current_sps: ?sps_mod.SPS = null;
 
-
     while (try splitter.next(h)) |nal| {
         h.nal_count += 1;
 
@@ -83,7 +83,16 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
                 const nal_ref_idc: u2 = @intCast((nal.data[0] >> 5) & 3);
                 const slice_header = try slice_mod.SliceHeader.parse_slice_header(&bit_reader, nal.nal_type, nal_ref_idc, h.sps_list, h.pps_list);
+
+                // 先不解析其他P/Bslice
+                const is_i = (slice_header.slice_type % 5) == 2;
+                if (!is_i) break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
+
+                const pps = h.pps_list[slice_header.pic_parameter_set_id].?;
+                const slice_qp_y = pps.pic_init_qp_minus26 + 26 + slice_header.slice_qp_delta;
                 // 初始化算术解码引擎
+                var engine = try CABACEngine.init(slice_header.slice_type, slice_header.cabac_init_idc, slice_qp_y, &bit_reader);
+                var syntax = CABACSyntax.init(&engine);
                 // 初始化上下文变量表
                 if (slice_header.first_mb_in_slice == 0) {
                     // 输出上一帧AVFrame
@@ -114,7 +123,6 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     // return TypeError.NotMaintainedType;
 }
 
-
 export fn my_zigh264(
     ctx: ?*FFmpeg.AVCodecContext,
     frame: ?*FFmpeg.AVFrame,
@@ -133,7 +141,7 @@ export fn my_zigh264(
             .width = 0,
             .height = 0,
             .sps_list = [_]?sps_mod.SPS{null} ** 32,
-            .pps_list= [_]?pps_mod.PPS{null} ** 256,
+            .pps_list = [_]?pps_mod.PPS{null} ** 256,
             .nals = std.ArrayList(NALUnit).initCapacity(std.heap.c_allocator, 10) catch |e| {
                 std.debug.print("{any}\n", .{e});
                 return -1;

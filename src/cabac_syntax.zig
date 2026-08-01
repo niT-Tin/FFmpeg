@@ -1,6 +1,6 @@
 const CABACEngine = @import("cabac.zig").CABACEngine;
 
-const CABACSyntax = struct {
+pub const CABACSyntax = struct {
     engine: *CABACEngine,
     pub fn init(e: *CABACEngine) CABACSyntax {
         return .{
