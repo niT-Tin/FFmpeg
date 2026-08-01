@@ -4,6 +4,10 @@ pub const TypeError = error{
     NotMaintainedType,
 };
 
+pub const DecodeError = error {
+  DecodeMBQPDeltaError,
+};
+
 pub const NALError = error{
     NoStartCode,
     InvalidData,

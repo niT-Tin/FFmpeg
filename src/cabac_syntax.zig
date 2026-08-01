@@ -1,4 +1,5 @@
 const CABACEngine = @import("cabac.zig").CABACEngine;
+const DecodeError = @import("types.zig").DecodeError;
 
 pub const CABACSyntax = struct {
     engine: *CABACEngine,
@@ -28,6 +29,44 @@ pub const CABACSyntax = struct {
         mb_type += 2 * @as(u32, try self.engine.decode_decision(6)); // intra16x16_pred_mode 高位
         mb_type += 1 * @as(u32, try self.engine.decode_decision(6)); // intra16x16_pred_mode 低位
         return mb_type;
+    }
+
+    pub fn decode_I_4x4_intra_premod(self: *CABACSyntax, most_probable_mode: u32) !u32 {
+        const flag = try self.engine.decode_decision(68);
+        if (flag == 1) return most_probable_mode;
+
+        var bins = [_]u1{0} ** 3;
+        for (0..3) |i| {
+            bins[i] = try self.engine.decode_decision(69);
+        }
+        const rem: u32 = @as(u32, bins[0]) + @as(u32, bins[1]) * 2 + @as(u32, bins[2]) * 4;
+
+        return rem + (if (rem >= most_probable_mode) @as(u32, 1) else @as(u32, 0));
+    }
+
+    pub fn decode_I_16x16_intra_chrom_premod(self: *CABACSyntax, cond_term_a: u16, cond_term_b: u16) !u32 {
+        const ctx_0 = 64 + cond_term_a + cond_term_b;
+        if (try self.engine.decode_decision(ctx_0) == 0) return 0; // DC
+        if (try self.engine.decode_decision(67) == 0) return 1; // Horizontal
+        if (try self.engine.decode_decision(67) == 0) return 2; // Vertical
+        return 3; // Plane
+    }
+
+    pub fn decode_mb_qp_delta(self: *CABACSyntax, prev_mb_qp_delta: i32) !i32 {
+        var ctx: u16 = 60 + (if (prev_mb_qp_delta != 0) @as(u16, 1) else @as(u16, 0));
+        var val: i32 = 0;
+        while (try self.engine.decode_decision(ctx) == 1) {
+            val += 1;
+            ctx = 62;
+            if (val > 2 * 51) return DecodeError.DecodeMBQPDeltaError;
+        }
+        var delta: i32 = 0;
+        if ((val & 1) == 1) {
+            delta = @divTrunc((val + 1), 2);
+        } else {
+            delta = @divTrunc(-(val + 1), 2);
+        }
+        return delta;
     }
 };
 
@@ -98,4 +137,120 @@ test "decode_mb_type_I: cbp_luma=1 -> mb_type 13" {
     var engine = testEngine(510, 400, &br);
     var syntax = CABACSyntax.init(&engine);
     try std.testing.expectEqual(13, try syntax.decode_mb_type_I());
+}
+
+test "decode_I_4x4_intra_premod: flag=1 -> 直接返回 most_probable_mode" {
+    // ctx68 p=0,mps=0: range=510,q=3,lps=240,mps=270; offset=300 >= 270 -> LPS -> bin=1
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 300, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(2, try syntax.decode_I_4x4_intra_premod(2));
+}
+
+test "decode_I_4x4_intra_premod: flag=0, rem=0, mpm=1 -> mode 0" {
+    // offset=20, 码流全 0
+    // flag (ctx68): 20<270 -> MPS -> 0; range=270 不 renorm
+    // rem bin0 (ctx69): q=0,lps=128,mps=142; 20<142 -> 0; p 0->1; range=142 -> renorm -> 284, offset=40
+    // rem bin1 (ctx69 p=1): q=0,lps=128,mps=156; 40<156 -> 0; p 1->2; range=156 -> renorm -> 312, offset=80
+    // rem bin2 (ctx69 p=2): q=0,lps=128,mps=184; 80<184 -> 0
+    // rem=0; 0 >= mpm(1)? 否 -> mode = 0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 20, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_I_4x4_intra_premod(1));
+}
+
+test "decode_I_4x4_intra_premod: flag=0, rem=3, mpm=2 -> mode 4 (验证 rem>=mpm 时 +1 跳过)" {
+    // offset=180, 码流全 0
+    // flag (ctx68): 180<270 -> MPS -> 0; range=270 不 renorm
+    // rem bin0 (ctx69): q=0,lps=128,mps=142; 180>=142 -> LPS -> bin=1-0=1; val_mps->1
+    //   offset=38, range=128 -> renorm -> 256, offset=76
+    // rem bin1 (ctx69 val_mps=1): mps=128; 76<128 -> MPS -> bin=val_mps=1; p 0->1
+    //   range=128 -> renorm -> 256, offset=152
+    // rem bin2 (ctx69 p=1, val_mps=1): lps=128,mps=128; 152>=128 -> LPS -> bin=1-1=0
+    // rem = 1+2 = 3; 3 >= mpm(2) -> mode = 3+1 = 4
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 180, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(4, try syntax.decode_I_4x4_intra_premod(2));
+}
+
+test "decode_I_16x16_intra_chrom_premod: bin0=0 -> DC (0)" {
+    // offset=100 < 270 -> bin0 (ctx64, cond_term=0+0) = 0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_I_16x16_intra_chrom_premod(0, 0));
+}
+
+test "decode_I_16x16_intra_chrom_premod: bin串 10 -> Horizontal (1)" {
+    // offset=300, 码流 0b1000_0000
+    // bin0 (ctx64): 300>=270 -> LPS -> 1; offset=30, range=240 -> renorm -> 480, offset=61
+    // bin1 (ctx67): q=3,lps=240,mps=240; 61<240 -> MPS -> 0 -> 返回 1
+    const data = [1]u8{0b1000_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 300, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(1, try syntax.decode_I_16x16_intra_chrom_premod(0, 0));
+}
+
+test "decode_I_16x16_intra_chrom_premod: bin串 111 -> Plane (3)" {
+    // offset=420, 码流 0b1100_0000
+    // bin0 (ctx64): 420>=270 -> LPS -> 1; offset=150, range=240 -> renorm -> 480, offset=301
+    // bin1 (ctx67): 301>=240 -> LPS -> 1; val_mps->1; offset=61, range=240 -> renorm -> 480, offset=123
+    // bin2 (ctx67 val_mps=1): 123<240 -> MPS -> bin=val_mps=1 -> 返回 3
+    const data = [1]u8{0b1100_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 420, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(3, try syntax.decode_I_16x16_intra_chrom_premod(0, 0));
+}
+
+test "decode_mb_qp_delta: 首 bin=0 -> delta 0" {
+    // offset=100 < 270 -> bin0 (ctx60, prev=0) = 0 -> val=0 -> delta 0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_mb_qp_delta(0));
+}
+
+test "decode_mb_qp_delta: bin串 10 -> +1" {
+    // offset=300, 码流 0b1000_0000
+    // bin0 (ctx60): 300>=270 -> LPS -> 1; offset=30, range=240 -> renorm -> 480, offset=61
+    // bin1 (ctx62): mps=240; 61<240 -> MPS -> 0 -> 停止, val=1 -> +(1+1)/2 = 1
+    const data = [1]u8{0b1000_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 300, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(1, try syntax.decode_mb_qp_delta(0));
+}
+
+test "decode_mb_qp_delta: bin串 110 -> -1" {
+    // offset=509, 码流 0b1100_0000
+    // bin0 (ctx60): 509>=270 -> LPS -> 1; offset=239, range=240 -> renorm -> 480, offset=479
+    // bin1 (ctx62): 479>=240 -> LPS -> 1; val_mps->1; offset=239, range=240 -> renorm -> 480, offset=479
+    // bin2 (ctx62 val_mps=1): 479>=240 -> LPS -> 1-1=0 -> 停止, val=2 -> -(2+1)/2 = -1
+    const data = [1]u8{0b1100_0000};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 509, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(-1, try syntax.decode_mb_qp_delta(0));
+}
+
+test "decode_mb_qp_delta: prev != 0 时首 bin 用 ctx 61" {
+    // prev=2: 首 bin 应作用于 ctx61 (规范和 FFmpeg: 60 + (prev != 0))
+    // offset=100 -> MPS -> bin=0 -> delta=0
+    // 若条件写反 (prev==0 时才 +1), ctx60 会被误触
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_mb_qp_delta(2));
+    try std.testing.expectEqual(1, engine.context[61].p_state_idx); // ctx61 被使用且 MPS 命中
+    try std.testing.expectEqual(0, engine.context[60].p_state_idx); // ctx60 不受影响
 }
