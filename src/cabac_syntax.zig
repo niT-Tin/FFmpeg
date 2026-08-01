@@ -1,6 +1,8 @@
 const CABACEngine = @import("cabac.zig").CABACEngine;
 const DecodeError = @import("types.zig").DecodeError;
 
+pub const CoeffList = struct {};
+
 pub const CABACSyntax = struct {
     engine: *CABACEngine,
     pub fn init(e: *CABACEngine) CABACSyntax {
@@ -68,6 +70,16 @@ pub const CABACSyntax = struct {
         }
         return delta;
     }
+
+    // pub fn decode_coded_block_flag(self: *CABACSyntax, cat: u32, nza: u32, nzb: u32) !u1 {}
+
+    // pub fn decode_significance(self: *CABACSyntax, cat: u32, max_coeff: u32) !CoeffList {}
+
+    // pub fn decode_coef_levels(self: *CABACSyntax, cat: u32, list: []CoeffList) !void {}
+
+    // pub fn decode_residual_block(cat: u32)
+
+    // pub fn decode_residual(mb_type: u16, cbp)
 };
 
 // ---- 测试辅助 ----
