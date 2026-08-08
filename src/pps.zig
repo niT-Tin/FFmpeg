@@ -32,6 +32,14 @@ pub const PPS = struct {
     deblocking_filter_control_present_flag: bool, // u(1)
     constrained_intra_pred_flag: bool, // u(1)
     redundant_pic_cnt_present_flag: bool, // u(1)
+
+    // ===== High profile 扩展字段 (RBSP 有剩余数据时才存在) =====
+    // 注意: 规范里这个 PPS 字段叫 transform_8x8_mode_flag;
+    // transform_size_8x8_flag 是宏块层里的语法元素, 别混淆
+    transform_8x8_mode_flag: bool, // u(1)   为1时 I_4x4 宏块前多一个 transform_size_8x8_flag
+    pic_scaling_matrix_present_flag: bool, // u(1)
+    second_chroma_qp_index_offset: i32, // se(v)
+
     pub fn init() PPS {
         return PPS{
             .pic_parameter_set_id = 0,
@@ -54,6 +62,9 @@ pub const PPS = struct {
             .deblocking_filter_control_present_flag = false,
             .constrained_intra_pred_flag = false,
             .redundant_pic_cnt_present_flag = false,
+            .transform_8x8_mode_flag = false,
+            .pic_scaling_matrix_present_flag = false,
+            .second_chroma_qp_index_offset = 0,
         };
     }
 
@@ -79,6 +90,38 @@ pub const PPS = struct {
         pps.deblocking_filter_control_present_flag = try pps_bit_reader.next_bit() != 0;
         pps.constrained_intra_pred_flag = try pps_bit_reader.next_bit() != 0;
         pps.redundant_pic_cnt_present_flag = try pps_bit_reader.next_bit() != 0;
+
+        // High profile 扩展: 仅当 RBSP 还有剩余数据时存在 (baseline 的 PPS 到此结束)
+        if (pps_bit_reader.byte_pos < pps_bit_reader.buf.len) {
+            pps.transform_8x8_mode_flag = try pps_bit_reader.next_bit() != 0;
+            pps.pic_scaling_matrix_present_flag = try pps_bit_reader.next_bit() != 0;
+            if (pps.pic_scaling_matrix_present_flag) {
+                // TODO: 列表个数依赖 SPS 的 chroma_format_idc (4:4:4 时为 6+6*flag),
+                // 这里按 4:2:0 写死为 6 + 2*flag; 后续 parse_pps 应传入 SPS 查询
+                const list_count = 6 + 2 * @as(u32, @intFromBool(pps.transform_8x8_mode_flag));
+                for (0..list_count) |i| {
+                    const present = try pps_bit_reader.next_bit() != 0;
+                    if (present) {
+                        try skip_scaling_list(pps_bit_reader, if (i < 6) 16 else 64);
+                    }
+                }
+            }
+            pps.second_chroma_qp_index_offset = try expGolomb.read_se(pps_bit_reader);
+        }
         return pps;
     }
 };
+
+// 跳过 scaling_list (规范 7.3.2.1.1.1): delta 链编码, next_scale 归零后不再消耗 bit
+// TODO: 与 sps.zig:126 的同类逻辑去重, 抽成公共函数
+fn skip_scaling_list(br: *BitReader, size: usize) !void {
+    var last_scale: i32 = 8;
+    var next_scale: i32 = 8;
+    for (0..size) |_| {
+        if (next_scale != 0) {
+            const delta = try expGolomb.read_se(br);
+            next_scale = (last_scale + delta) & 0xFF;
+        }
+        last_scale = if (next_scale != 0) next_scale else last_scale;
+    }
+}
