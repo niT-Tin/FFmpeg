@@ -46,6 +46,16 @@ const DecodeError = @import("types.zig").DecodeError;
 
 pub const CoeffList = struct {};
 
+pub const BlockType = enum(u8) {
+    luma_dc_intra16 = 0,
+    luma_ac_intra16 = 1,
+    luma_4x4 = 2,
+    chroma_dc = 3,
+    chroma_ac = 4,
+};
+
+const coded_block_flag_offset = [_]u16{85, 89, 93, 97, 101};
+
 pub const CABACSyntax = struct {
     engine: *CABACEngine,
     pub fn init(e: *CABACEngine) CABACSyntax {
@@ -171,7 +181,13 @@ pub const CABACSyntax = struct {
 
         return cbp;
     }
-    // pub fn decode_coded_block_flag(self: *CABACSyntax, cat: u32, nza: u32, nzb: u32) !u1 {}
+    // coded_block_flag (规范 9.3.3.1.1.9): 该系数块是否含非零系数
+    // ctxIdx = coded_block_flag_offset[cat] + condTermFlagA + 2*condTermFlagB
+    // 邻居推导 (含跨宏块可用性) 由调用方完成, 这里只收结果 nza/nzb
+    pub fn decode_coded_block_flag(self: *CABACSyntax, cat: BlockType, nza: u1, nzb: u1) !u1 {
+        const ctx_id = coded_block_flag_offset[@intFromEnum(cat)] + nza + 2 * @as(u16, nzb);
+        return self.engine.decode_decision(ctx_id);
+    }
 
     // pub fn decode_significance(self: *CABACSyntax, cat: u32, max_coeff: u32) !CoeffList {}
 
@@ -465,7 +481,7 @@ test "cbp: cbp 返回值结构正确 — luma 和 chroma 分别在不同 bit 位
     // 不管实际解码结果是什么, 验证:
     // - bits 0-3 对应 luma (可能任意值)
     // - bits 4-5 == bits 6-7 (因为我们的实现 Cb/Cr 共享一个 chroma_cbp)
-    const data = [_]u8{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const data = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
     var br = BitReader.init(&data);
     var engine = testEngine(510, 509, &br);
     var syntax = CABACSyntax.init(&engine);
@@ -474,4 +490,82 @@ test "cbp: cbp 返回值结构正确 — luma 和 chroma 分别在不同 bit 位
     const chroma_cb = (result >> 4) & 0x03;
     const chroma_cr = (result >> 6) & 0x03;
     try std.testing.expectEqual(chroma_cb, chroma_cr);
+}
+
+// ─── decode_coded_block_flag 测试 ───
+// 所有上下文初始为 p_state_idx=0, val_mps=0:
+//   range=510, q=3, lps=240, mps=270
+//   offset < 270 -> MPS -> 返回 val_mps=0, p_state_idx 0->1
+//   offset >= 270 -> LPS -> 返回 1-val_mps=1, val_mps 翻转为 1 (p=0 时)
+// 测试通过检查"哪个 ctxIdx 被触碰"来验证 offset 表和 ctxIdxInc 权重。
+
+test "decode_coded_block_flag: luma_4x4, nza=0 nzb=0 -> ctx 93, MPS 返回 0" {
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_coded_block_flag(.luma_4x4, 0, 0));
+    try std.testing.expectEqual(1, engine.context[93].p_state_idx); // ctx93 被使用 (MPS 爬升)
+    try std.testing.expectEqual(0, engine.context[94].p_state_idx); // 相邻槽位不受影响
+}
+
+test "decode_coded_block_flag: nza=1 nzb=0 -> ctx 94 (验证 nza 权重为 1)" {
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_coded_block_flag(.luma_4x4, 1, 0));
+    try std.testing.expectEqual(1, engine.context[94].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[93].p_state_idx);
+}
+
+test "decode_coded_block_flag: nza=0 nzb=1 -> ctx 95 (验证 nzb 权重为 2)" {
+    // 若 2*nzb 写成 nzb 会落到 ctx94, 此测试可抓住该笔误
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_coded_block_flag(.luma_4x4, 0, 1));
+    try std.testing.expectEqual(1, engine.context[95].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[94].p_state_idx);
+}
+
+test "decode_coded_block_flag: nza=1 nzb=1 -> ctx 96 (组内最大 ctxIdxInc)" {
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_coded_block_flag(.luma_4x4, 1, 1));
+    try std.testing.expectEqual(1, engine.context[96].p_state_idx);
+}
+
+test "decode_coded_block_flag: cat=chroma_ac -> 基址 101 (验证 offset 表映射)" {
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_coded_block_flag(.chroma_ac, 0, 0));
+    try std.testing.expectEqual(1, engine.context[101].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[93].p_state_idx); // 不会误用 luma_4x4 组
+}
+
+test "decode_coded_block_flag: cat=luma_dc_intra16 -> 基址 85" {
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 100, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(0, try syntax.decode_coded_block_flag(.luma_dc_intra16, 0, 0));
+    try std.testing.expectEqual(1, engine.context[85].p_state_idx);
+}
+
+test "decode_coded_block_flag: LPS 路径返回 1 且 val_mps 翻转" {
+    // offset=300 >= mps=270 -> LPS -> bin = 1-0 = 1
+    // p_state_idx=0 时 LPS 触发 val_mps 翻转 (0->1), p_state_idx 保持 0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 300, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(1, try syntax.decode_coded_block_flag(.luma_4x4, 0, 0));
+    try std.testing.expectEqual(1, engine.context[93].val_mps);
+    try std.testing.expectEqual(0, engine.context[93].p_state_idx);
 }
