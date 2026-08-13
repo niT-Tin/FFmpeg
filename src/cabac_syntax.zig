@@ -1,6 +1,49 @@
 const CABACEngine = @import("cabac.zig").CABACEngine;
 const DecodeError = @import("types.zig").DecodeError;
 
+// ============================================================================
+// I slice 宏块层 (macroblock_layer, 规范 7.3.5) 实施路线 M0 ~ M5
+//
+// 一个宏块的码流顺序: mb_type -> [预测模式] -> intra_chroma_pred_mode
+//   -> coded_block_pattern -> mb_qp_delta -> 残差 -> (下一个宏块前) end_of_slice_flag
+// 每步做完都用 "terminate 恰好在帧尾触发" 做同步性检查。
+//
+// M0: I_PCM 分支 (mb_type = 25)
+//   - pcm_alignment_zero_bit: 丢弃 bit 直到字节对齐 (bit_reader 层做)
+//   - 跳过裸 PCM 数据: 256 亮度 + 2*64 色度字节 (8bit 4:2:0), 不走 CABAC
+//   - 之后 CABACEngine 必须重新 init (规范要求)
+//
+// M1: 4x4 预测模式 (I_4x4 路径, mb_type = 0)
+//   - 若 pps.transform_8x8_mode_flag = 1: 先读 transform_size_8x8_flag (1 bin),
+//     为 1 则本宏块改读 4 组 intra8x8 (否则 16 组 intra4x4)
+//   - 每块: prev_intra4x4_pred_mode_flag (ctxIdx 68, 1 bin);
+//     为 0 再读 rem_intra4x4_pred_mode (ctxIdx 69, 3 bin 定长 -> decode_fixed_length)
+//   - 无邻居依赖, 纯查表
+//
+// M2: intra_chroma_pred_mode
+//   - truncated unary, cMax = 3 (复用 decode_truncated_unary)
+//   - ctxIdxOffset = 64, ctxIdxInc = condTermA + 2*condTermB
+//     (condTerm: 左/上宏块可用且其 intra_chroma_pred_mode != 0)
+//   - 前置: 邻居状态基建 (top 数组按列缓存 + left 变量, 行首 left 置不可用)
+//
+// M3: coded_block_pattern (仅 I_4x4 / inter 路径; I_16x16 的 cbp 已含在 mb_type 里)
+//   - luma: 4 bin 查 Table 9-17 码表反解 (ctxIdxOffset 73)
+//   - chroma: 2 bin (ctxIdxOffset 77)
+//   - ctxIdxInc 均为邻居依赖 (左/上的对应 bit 位)
+//
+// M4: mb_qp_delta (仅当 cbp 非 0 时存在)
+//   - 有符号值, binarization: bin0 表 "是否为 0", 之后一元码 + 末尾符号位
+//   - ctxIdxOffset 60/61/62 (bin0 / 一元码部分 / 符号位)
+//
+// M5: 残差 (大头, 规范 7.3.5.3)
+//   - coded_block_flag: 每个 4x4 块一个 (ctxIdxOffset 85~, 依赖邻居)
+//   - 逐块: significant_coeff_flag / last_significant_coeff_flag
+//     (按扫描位置查表, 已有 last_coeff_flag_offset_8x8; 4x4 的表待补)
+//   - coeff_abs_level_minus1: uegk (前缀 decision + 后缀 bypass, 已就绪)
+//   - coeff_sign_flag: 每系数 1 bin, 走 decode_bypass
+//   - 完成后 terminate 同步性检查真正生效
+// ============================================================================
+
 pub const CoeffList = struct {};
 
 pub const CABACSyntax = struct {
