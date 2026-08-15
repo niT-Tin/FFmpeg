@@ -44,7 +44,12 @@ const DecodeError = @import("types.zig").DecodeError;
 //   - 完成后 terminate 同步性检查真正生效
 // ============================================================================
 
-pub const CoeffList = struct {};
+pub const CoeffList = struct {
+    pub const max_coeffs: u8 = 64; // 8x8块的上限
+    index: [max_coeffs]u8 = [_]u8{0} ** max_coeffs, // (o..maxNumCoeff-1)
+    level: [max_coeffs]i32 = [_]i32{0} ** max_coeffs,
+    count: u8 = 0, // 非0系数个数
+};
 
 pub const BlockType = enum(u8) {
     luma_dc_intra16 = 0,
@@ -54,7 +59,7 @@ pub const BlockType = enum(u8) {
     chroma_ac = 4,
 };
 
-const coded_block_flag_offset = [_]u16{85, 89, 93, 97, 101};
+const coded_block_flag_offset = [_]u16{ 85, 89, 93, 97, 101 };
 
 pub const CABACSyntax = struct {
     engine: *CABACEngine,
@@ -189,9 +194,34 @@ pub const CABACSyntax = struct {
         return self.engine.decode_decision(ctx_id);
     }
 
-    // pub fn decode_significance(self: *CABACSyntax, cat: u32, max_coeff: u32) !CoeffList {}
+    // 正向扫描，残差块非0系数index
+    pub fn decode_significance(self: *CABACSyntax, max_coeff: u8) !CoeffList {
+        var result_coeff_list: CoeffList = .{};
+        var encounter_last: bool = false;
+        for (0..max_coeff - 1) |i| {
+            const pos: u8 = @intCast(i);
+            if (try self.engine.decode_decision(105 + @as(u16, pos)) == 1) {
+                result_coeff_list.index[result_coeff_list.count] = pos;
+                result_coeff_list.count += 1;
+                if (try self.engine.decode_decision(166 + @as(u16, pos)) == 1) {
+                    encounter_last = true;
+                    break; // 最后一个非0系数
+                }
+            }
+        }
+        if (!encounter_last) {
+            result_coeff_list.index[result_coeff_list.count] = max_coeff - 1;
+            result_coeff_list.count += 1;
+        }
+        // 只是单纯填充了index
+        return result_coeff_list;
+    }
 
-    // pub fn decode_coef_levels(self: *CABACSyntax, cat: u32, list: []CoeffList) !void {}
+    // pub fn decode_coef_levels(self: *CABACSyntax, cat: u32, list: *CoeffList) !void {
+    //     for (list.count - 1..0) |i| {
+    //         const index = list.index[i];
+    //     }
+    // }
 
     // pub fn decode_residual_block(cat: u32)
 
@@ -568,4 +598,84 @@ test "decode_coded_block_flag: LPS 路径返回 1 且 val_mps 翻转" {
     try std.testing.expectEqual(1, try syntax.decode_coded_block_flag(.luma_4x4, 0, 0));
     try std.testing.expectEqual(1, engine.context[93].val_mps);
     try std.testing.expectEqual(0, engine.context[93].p_state_idx);
+}
+
+// ─── decode_significance 测试 ───
+// 上下文全部初始化为 p_state_idx=0, val_mps=0 (range=510, q=3, lps=240, mps=270):
+//   offset < 270 -> MPS -> bin=0, range=270 不 renorm, offset 不变, p_state_idx 0->1
+//   offset >= 270 -> LPS -> bin=1, val_mps 翻转 0->1, offset=2*(offset-270)+码流bit
+// significance map 的 ctxIdx: significant=105+i, last=166+i (块内每个槽位最多碰一次),
+// 因此用 "哪些槽位被碰过" 可以精确断言扫描路径。
+
+test "decode_significance: 全部 significant=0 -> 隐式末尾位置 (max_coeff=16)" {
+    // offset=0: 任何 mps 区间都满足 0 < mps -> 全程 MPS -> sig 全 0;
+    // renorm 时 off = (0<<n)|0 恒为 0, 不会漂移
+    // i=0..14 全 0, 循环正常跑完 -> 位置 15 隐式非零: index=[15], count=1
+    const data = [4]u8{ 0, 0, 0, 0 };
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    const list = try syntax.decode_significance(16);
+    try std.testing.expectEqual(1, list.count);
+    try std.testing.expectEqual(15, list.index[0]);
+    try std.testing.expectEqual(1, engine.context[105].p_state_idx); // i=0 被扫到
+    try std.testing.expectEqual(1, engine.context[119].p_state_idx); // i=14 被扫到
+    try std.testing.expectEqual(0, engine.context[120].p_state_idx); // i=15 不在循环内
+    // significant=0 时不得读 last flag: 166..180 全部未被触碰
+    try std.testing.expectEqual(0, engine.context[166].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[166].val_mps);
+    try std.testing.expectEqual(0, engine.context[180].p_state_idx);
+}
+
+test "decode_significance: significant=1 且 last=1 -> 立即 break" {
+    // offset=509: ctx105: 509>=270(mps) -> LPS -> sig=1, val_mps 翻转为 1
+    //   offset=509-270=239, range=lps=240 -> renorm n=1 -> range=480, offset=478|0=478
+    // ctx166: q=(480>>6)&3=3, lps=240, mps=480-240=240; 478>=240 -> LPS -> last=1 -> break
+    // -> index=[0], count=1
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 509, &br);
+    var syntax = CABACSyntax.init(&engine);
+    const list = try syntax.decode_significance(16);
+    try std.testing.expectEqual(1, list.count);
+    try std.testing.expectEqual(0, list.index[0]);
+    try std.testing.expectEqual(1, engine.context[105].val_mps); // LPS 翻转, 证明进了 significant 分支
+    try std.testing.expectEqual(1, engine.context[166].val_mps); // last flag 被读取
+    try std.testing.expectEqual(0, engine.context[106].p_state_idx); // i=1 未执行: break 生效
+    try std.testing.expectEqual(0, engine.context[106].val_mps);
+}
+
+test "decode_significance: significant=1, last=0, 后续全 0 -> index=[0,15]" {
+    // offset=270: ctx105: q=3, lps=240, mps=270; 270>=270 -> LPS -> sig=1
+    //   offset=270-270=0, range=240 -> renorm n=1 -> 480, offset=(0<<1)|0=0; val_mps(105) 翻转为 1
+    // ctx166: q=(480>>6)&3=3, lps=240, mps=240; 0<240 -> MPS -> last=0, p(166) 0->1
+    //   range=240 -> renorm -> 480, offset 仍 0
+    // i=1..14 (ctx106..119): offset=0 恒 MPS -> sig 全 0
+    // 循环跑完无 last -> 隐式末尾: index=[0,15], count=2
+    const data = [4]u8{ 0, 0, 0, 0 };
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 270, &br);
+    var syntax = CABACSyntax.init(&engine);
+    const list = try syntax.decode_significance(16);
+    try std.testing.expectEqual(2, list.count);
+    try std.testing.expectEqual(0, list.index[0]);
+    try std.testing.expectEqual(15, list.index[1]);
+    try std.testing.expectEqual(1, engine.context[105].val_mps);
+    try std.testing.expectEqual(1, engine.context[166].p_state_idx); // last flag 被读了 (MPS 爬升)
+    try std.testing.expectEqual(0, engine.context[166].val_mps);
+    try std.testing.expectEqual(0, engine.context[167].p_state_idx); // i=1 的 last flag 不应被读
+}
+
+test "decode_significance: max_coeff=4 (chroma_dc) 循环边界恰好覆盖 i=0..2" {
+    // offset=20 全程 MPS=0 -> 隐式位置 3
+    // 若循环边界误写成 0..max_coeff-2, i=2 (ctx107) 不会被扫到, 此测试可抓住
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 20, &br);
+    var syntax = CABACSyntax.init(&engine);
+    const list = try syntax.decode_significance(4);
+    try std.testing.expectEqual(1, list.count);
+    try std.testing.expectEqual(3, list.index[0]);
+    try std.testing.expectEqual(1, engine.context[107].p_state_idx); // i=2 被扫到
+    try std.testing.expectEqual(0, engine.context[108].p_state_idx); // i=3 不在循环内
 }
