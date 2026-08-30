@@ -61,6 +61,12 @@ pub const BlockType = enum(u8) {
 
 const coded_block_flag_offset = [_]u16{ 85, 89, 93, 97, 101 };
 
+const levels_base = [_]u16{ 227, 237, 247, 257, 266 };
+const levels_ctx = [_]u8{ 1, 2, 3, 4, 0, 0, 0, 0 };
+const levels_gt1_ctx = [_]u8{ 5, 5, 5, 5, 6, 7, 8, 9 };
+const levels_trans_eq1 = [_]u8{ 1, 2, 3, 3, 4, 5, 6, 7 };
+const levels_trans_gt1 = [_]u8{ 4, 4, 4, 4, 5, 6, 7, 7 };
+
 pub const CABACSyntax = struct {
     engine: *CABACEngine,
     pub fn init(e: *CABACEngine) CABACSyntax {
@@ -217,11 +223,44 @@ pub const CABACSyntax = struct {
         return result_coeff_list;
     }
 
-    // pub fn decode_coef_levels(self: *CABACSyntax, cat: u32, list: *CoeffList) !void {
-    //     for (list.count - 1..0) |i| {
-    //         const index = list.index[i];
-    //     }
-    // }
+    pub fn decode_coef_levels(self: *CABACSyntax, cat: u32, list: *CoeffList) !void {
+        var node_ctx: u8 = 0;
+        for (0..list.count) |i| {
+            const reversed_index = list.count - i - 1;
+            const bin = try self.engine.decode_decision(levels_base[cat] + levels_ctx[node_ctx]);
+            var coeff_abs: u32 = undefined;
+            if (bin == 0) {
+                coeff_abs = 1;
+            } else {
+                coeff_abs = 2;
+                const ctx = levels_base[cat] + levels_gt1_ctx[node_ctx];
+                while (coeff_abs < 15 and try self.engine.decode_decision(ctx) == 1) {
+                    coeff_abs += 1;
+                }
+                if (coeff_abs == 15) {
+                  // EG0 后缀一元部分: j 上限 23 (对齐 FFmpeg j < 16+7), 防损坏码流空转
+                  var one_re: u32 = 0;
+                  while (try self.engine.decode_bypass() == 1) {
+                    one_re += 1;
+                    if (one_re > 23) return DecodeError.DecodeCoeffLevelError;
+                  }
+                  var j = one_re;
+                  var s: u32 = 1;
+                  while(j > 0) {
+                    j -= 1;
+                    s = s * 2 + try self.engine.decode_bypass();
+                  }
+                  coeff_abs = 14 + s;
+                }
+            }
+
+            const sign = try self.engine.decode_bypass();
+            const coeff_abs_i32: i32 = @intCast(coeff_abs);
+            list.level[reversed_index] = if (sign == 0) coeff_abs_i32 else -coeff_abs_i32;
+            node_ctx = if (coeff_abs == 1) levels_trans_eq1[node_ctx] else levels_trans_gt1[node_ctx];
+            // const index = list.index[reversed_index];
+        }
+    }
 
     // pub fn decode_residual_block(cat: u32)
 
@@ -678,4 +717,82 @@ test "decode_significance: max_coeff=4 (chroma_dc) 循环边界恰好覆盖 i=0.
     try std.testing.expectEqual(3, list.index[0]);
     try std.testing.expectEqual(1, engine.context[107].p_state_idx); // i=2 被扫到
     try std.testing.expectEqual(0, engine.context[108].p_state_idx); // i=3 不在循环内
+}
+
+// ─── decode_coef_levels 测试 ───
+// 手造 CoeffList 直接喂入 (不经过 decode_significance), cat=2 (luma_4x4, base=247)
+// bin0 ctx = 247 + levels_ctx[node_ctx]; 第二段 ctx = 247 + levels_gt1_ctx[node_ctx]
+// 上下文初始化 p_state_idx=0, val_mps=0: offset<mps -> bin=0, offset>=mps -> bin=1
+
+test "decode_coef_levels: bin0=0 -> |level|=1, 符号 0 -> +1 (±1 路径)" {
+    // offset=0: bin0 (ctx248) MPS -> 0 -> coeff_abs=1, p(248) 0->1
+    // 符号位 bypass: offset=0 -> 0 -> 正
+    var list: CoeffList = .{ .count = 1 };
+    list.index[0] = 7;
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try syntax.decode_coef_levels(2, &list);
+    try std.testing.expectEqual(1, list.level[0]);
+    try std.testing.expectEqual(1, engine.context[248].p_state_idx); // bin0 ctx 被碰
+    try std.testing.expectEqual(0, engine.context[252].p_state_idx); // 第二段未进入
+}
+
+test "decode_coef_levels: bin0=1, 第二段首个 bin=0 -> |level|=2" {
+    // offset=270: ctx248 q=3, lps=240, mps=270; 270>=270 -> LPS -> bin=1
+    //   offset=0, range=240 -> renorm -> 480, offset=0; val_mps(248) 翻转为 1
+    // ctx252 q=3, lps=240, mps=240; 0<240 -> MPS -> 0 -> 停止, coeff_abs=2
+    // 符号位 bypass: offset=0 -> 0 -> +2
+    var list: CoeffList = .{ .count = 1 };
+    list.index[0] = 3;
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 270, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try syntax.decode_coef_levels(2, &list);
+    try std.testing.expectEqual(2, list.level[0]);
+    try std.testing.expectEqual(1, engine.context[248].val_mps); // bin0 走了 LPS
+    try std.testing.expectEqual(1, engine.context[252].p_state_idx); // 第二段被进入
+}
+
+test "decode_coef_levels: 前缀打满 14 个 1 -> EG0 后缀 (j=2, s=6) -> |level|=20" {
+    // offset=390, 码流 0x40: bin0 (ctx248) LPS -> 1; 第二段 (ctx252) 连续 13 个 1
+    //   (首个 1 靠 LPS, val_mps 翻转后 MPS=1 自持) -> coeff_abs 顶到 15
+    // 后缀 bypass: 2 个 1 后 0 -> j=2; 再读 2 bit "10" -> s = 1->3->6
+    // coeff_abs = 14 + 6 = 20; 符号位 0 -> +20
+    // 若后缀累加器误从 2 开始, 结果会错成 24, 此测试可抓住
+    var list: CoeffList = .{ .count = 1 };
+    list.index[0] = 0;
+    const data = [4]u8{ 0x40, 0, 0, 0 };
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 390, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try syntax.decode_coef_levels(2, &list);
+    try std.testing.expectEqual(20, list.level[0]);
+}
+
+test "decode_coef_levels: 多系数 node_ctx 状态机转移 (gt1 锁死到状态 4)" {
+    // count=2, 逆序解: k=1 先解, k=0 后解
+    // offset=270, 码流全 0:
+    // k=1: node_ctx=0, bin0 (ctx248) 270>=270 -> LPS -> 1
+    //      第二段 (ctx252) MPS -> 0 -> coeff_abs=2; 符号 0 -> level[1]=+2
+    //      转移: gt1 -> node_ctx = levels_trans_gt1[0] = 4
+    // k=0: node_ctx=4, bin0 ctx = 247 + levels_ctx[4] = 247+0 = 247 (!)
+    //      MPS -> 0 -> coeff_abs=1; 符号 0 -> level[0]=+1
+    // 若 gt1 转移错误 (没锁到状态 4), k=0 的 bin0 会回落到 ctx248, ctx247 不会被碰
+    var list: CoeffList = .{ .count = 2 };
+    list.index[0] = 0;
+    list.index[1] = 5;
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 270, &br);
+    var syntax = CABACSyntax.init(&engine);
+    try syntax.decode_coef_levels(2, &list);
+    try std.testing.expectEqual(1, list.level[0]);
+    try std.testing.expectEqual(2, list.level[1]);
+    try std.testing.expectEqual(1, engine.context[248].val_mps); // k=1 bin0 走 LPS
+    try std.testing.expectEqual(1, engine.context[247].p_state_idx); // k=0 bin0 落在 base+0: 状态4 生效
+    try std.testing.expectEqual(1, engine.context[252].p_state_idx); // gt1 段进入过一次
+    try std.testing.expectEqual(0, engine.context[253].p_state_idx); // 未误用其他 gt1 槽位
 }

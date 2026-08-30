@@ -6,6 +6,7 @@ pub const TypeError = error{
 
 pub const DecodeError = error {
   DecodeMBQPDeltaError,
+  DecodeCoeffLevelError,
 };
 
 pub const NALError = error{
