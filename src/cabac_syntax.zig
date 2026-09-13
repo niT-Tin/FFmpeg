@@ -67,6 +67,8 @@ const levels_gt1_ctx = [_]u8{ 5, 5, 5, 5, 6, 7, 8, 9 };
 const levels_trans_eq1 = [_]u8{ 1, 2, 3, 3, 4, 5, 6, 7 };
 const levels_trans_gt1 = [_]u8{ 4, 4, 4, 4, 5, 6, 7, 7 };
 
+const max_num_coeff_table = [_]u8{ 16, 15, 16, 4, 15 };
+
 pub const CABACSyntax = struct {
     engine: *CABACEngine,
     pub fn init(e: *CABACEngine) CABACSyntax {
@@ -238,19 +240,19 @@ pub const CABACSyntax = struct {
                     coeff_abs += 1;
                 }
                 if (coeff_abs == 15) {
-                  // EG0 后缀一元部分: j 上限 23 (对齐 FFmpeg j < 16+7), 防损坏码流空转
-                  var one_re: u32 = 0;
-                  while (try self.engine.decode_bypass() == 1) {
-                    one_re += 1;
-                    if (one_re > 23) return DecodeError.DecodeCoeffLevelError;
-                  }
-                  var j = one_re;
-                  var s: u32 = 1;
-                  while(j > 0) {
-                    j -= 1;
-                    s = s * 2 + try self.engine.decode_bypass();
-                  }
-                  coeff_abs = 14 + s;
+                    // EG0 后缀一元部分: j 上限 23 (对齐 FFmpeg j < 16+7), 防损坏码流空转
+                    var one_re: u32 = 0;
+                    while (try self.engine.decode_bypass() == 1) {
+                        one_re += 1;
+                        if (one_re > 23) return DecodeError.DecodeCoeffLevelError;
+                    }
+                    var j = one_re;
+                    var s: u32 = 1;
+                    while (j > 0) {
+                        j -= 1;
+                        s = s * 2 + try self.engine.decode_bypass();
+                    }
+                    coeff_abs = 14 + s;
                 }
             }
 
@@ -262,7 +264,24 @@ pub const CABACSyntax = struct {
         }
     }
 
-    // pub fn decode_residual_block(cat: u32)
+    pub fn decode_residual_block(self: *CABACSyntax, cat: BlockType, nza: u1, nzb: u1, scantable: []const u8, block: []i32, nz_count: *u8) !void {
+        @memset(block, 0);
+        const max_num_coeff = max_num_coeff_table[@intFromEnum(cat)];
+        const coded_block_flag = try self.decode_coded_block_flag(cat, nza, nzb);
+        if (coded_block_flag == 0) {
+            nz_count.* = 0;
+            return;
+        } else {
+            // coded_block_flag == 1的情况，block系数存在不为0的情况
+            var list = try self.decode_significance(max_num_coeff);
+            std.debug.assert(list.count >= 1);
+            try self.decode_coef_levels(@intFromEnum(cat), &list);
+            for (0..list.count) |k| {
+                block[scantable[list.index[k]]] = list.level[k];
+            }
+            nz_count.* = list.count;
+        }
+    }
 
     // pub fn decode_residual(mb_type: u16, cbp)
 };
@@ -795,4 +814,80 @@ test "decode_coef_levels: 多系数 node_ctx 状态机转移 (gt1 锁死到状�
     try std.testing.expectEqual(1, engine.context[247].p_state_idx); // k=0 bin0 落在 base+0: 状态4 生效
     try std.testing.expectEqual(1, engine.context[252].p_state_idx); // gt1 段进入过一次
     try std.testing.expectEqual(0, engine.context[253].p_state_idx); // 未误用其他 gt1 槽位
+}
+
+// ─── decode_residual_block 测试 ───
+// 整链路: coded_block_flag -> decode_significance -> decode_coef_levels -> 查表写回
+// 4x4 zigzag 扫描表 (规范 Table 8-5): 扫描位置 -> 块内光栅位置
+const zigzag_4x4 = [16]u8{ 0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15 };
+// 色度 DC 2x2 块: 光栅顺序
+const raster_2x2 = [4]u8{ 0, 1, 2, 3 };
+
+test "residual_block: flag=0 -> 整块清零, 登记 0, 不进 significance" {
+    // cat=luma_4x4, nza=0 nzb=0 -> ctx93; offset=0 -> MPS -> flag=0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var block = [_]i32{99} ** 16; // 预填脏数据, 验证 memset
+    var nz: u8 = 77;
+    try syntax.decode_residual_block(.luma_4x4, 0, 0, &zigzag_4x4, &block, &nz);
+    try std.testing.expectEqual(0, nz);
+    for (block) |v| try std.testing.expectEqual(0, v);
+    try std.testing.expectEqual(1, engine.context[93].p_state_idx); // flag 被读
+    try std.testing.expectEqual(0, engine.context[105].p_state_idx); // significance 未进入
+}
+
+test "residual_block: 单系数块 (count=1), 扫描位置 0, level=+5" {
+    // offset=497, 码流 0x44: flag (ctx93) LPS -> 1; significance: sig[0]=1, last[0]=1
+    // levels: bin0=1, 第二段 3 个 1 后 0 -> coeff_abs=5, 符号 0 -> +5
+    // 写回: block[zigzag[0]] = block[0] = 5, 其余全 0
+    // 若写回循环误用 0..count-1, count=1 时一个系数都不写, block[0] 保持 0, 可抓住
+    const data = [4]u8{ 0x44, 0, 0, 0 };
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 497, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var block = [_]i32{0} ** 16;
+    var nz: u8 = 0;
+    try syntax.decode_residual_block(.luma_4x4, 0, 0, &zigzag_4x4, &block, &nz);
+    try std.testing.expectEqual(1, nz);
+    try std.testing.expectEqual(5, block[0]);
+    for (block[1..]) |v| try std.testing.expectEqual(0, v);
+}
+
+test "residual_block: 两系数块, 验证 zigzag 写回位置" {
+    // offset=396, 码流 0xFC: index=[0,4], levels=[+5,-2]
+    // zigzag[0]=0 -> block[0]=+5;  zigzag[4]=5 -> block[5]=-2
+    // 扫描表方向用反 (块位置->扫描位置) 时落点会错, 此测试专抓
+    const data = [4]u8{ 0xFC, 0, 0, 0 };
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 396, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var block = [_]i32{0} ** 16;
+    var nz: u8 = 0;
+    try syntax.decode_residual_block(.luma_4x4, 0, 0, &zigzag_4x4, &block, &nz);
+    try std.testing.expectEqual(2, nz);
+    try std.testing.expectEqual(5, block[0]);
+    try std.testing.expectEqual(-2, block[5]);
+    var sum: i32 = 0;
+    for (block) |v| sum += v;
+    try std.testing.expectEqual(3, sum); // 5 + (-2), 其余全 0
+}
+
+test "residual_block: chroma_dc (maxNumCoeff=4), 隐式末尾位置" {
+    // cat=chroma_dc -> ctx97; offset=270: flag LPS -> 1, offset 归 0
+    // significance 循环 i=0..2 全 MPS=0 -> 位置 3 隐式非零: index=[3]
+    // levels: bin0 (ctx=257+1=258) MPS -> 0 -> |level|=1, 符号 0 -> +1
+    // 写回: block[raster[3]] = block[3] = 1
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 270, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var block = [_]i32{0} ** 4;
+    var nz: u8 = 0;
+    try syntax.decode_residual_block(.chroma_dc, 0, 0, &raster_2x2, &block, &nz);
+    try std.testing.expectEqual(1, nz);
+    try std.testing.expectEqual(1, block[3]);
+    try std.testing.expectEqual(0, block[0]);
+    try std.testing.expectEqual(1, engine.context[97].val_mps); // flag 走了 LPS
 }
