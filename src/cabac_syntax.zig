@@ -59,6 +59,99 @@ pub const BlockType = enum(u8) {
     chroma_ac = 4,
 };
 
+pub const ResidualBuffers = struct {
+    luma: [16][16]i32, // 16个4x4亮度块(I_16x16 时存的只是15个AC)
+    luma_dc: [16]i32, // I_16x16的亮度DC块
+    cb_dc: [4]i32,
+    cr_dc: [4]i32, // 色度DC块
+    cb: [4][16]i32,
+    cr: [4][16]i32, // 色度AC块
+};
+
+const region_blocks = [4][4]u8{ .{ 0, 1, 4, 5 }, .{ 2, 3, 6, 7 }, .{ 8, 9, 12, 13 }, .{ 10, 11, 14, 15 } };
+
+pub const NzCache = struct {
+    // 本宏块 16 个 4x4 亮度块的非零计数, 按块光栅编号 0..15
+    luma: [16]u8,
+    // 左邻宏块最右一列 (其块 3, 7, 11, 15) 的计数, 按行 0..3
+    left_luma: [4]u8,
+    // 上邻宏块最下一行 (其块 12, 13, 14, 15) 的计数, 按列 0..3
+    top_luma: [4]u8,
+
+    // 色度: 每分量 4 个 AC 块 (2x2 排列), 左邻最右列 2 块, 上邻最下行 2 块
+    cb: [4]u8,
+    cr: [4]u8,
+    left_cb: [2]u8,
+    left_cr: [2]u8,
+    top_cb: [2]u8,
+    top_cr: [2]u8,
+    left_luma_dc: u8,
+    top_luma_dc: u8,
+
+    left_cb_dc: u8,
+    top_cb_dc: u8,
+    left_cr_dc: u8,
+    top_cr_dc: u8,
+    cur_luma_dc: u8,
+    cur_cb_dc: u8,
+    cur_cr_dc: u8,
+};
+
+// pred: 预测模式, 0=Vertical, 1=Horizontal, 2=DC, 3=Plane,
+// chroma = cbp_chroma:0 = 色度无残差，1=只有DC,2=DC+AC
+// luma = cbp_luma:0 = 15 个亮度，AC块全为0,1=全有
+pub const MbTypeI = enum(u8) {
+    i_4x4 = 0,
+
+    // cbp_luma = 0, cbp_chroma = 0
+    i_16x16_0_0_0 = 1,
+    i_16x16_1_0_0 = 2,
+    i_16x16_2_0_0 = 3,
+    i_16x16_3_0_0 = 4,
+    // cbp_luma = 0, cbp_chroma = 1
+    i_16x16_0_1_0 = 5,
+    i_16x16_1_1_0 = 6,
+    i_16x16_2_1_0 = 7,
+    i_16x16_3_1_0 = 8,
+    // cbp_luma = 0, cbp_chroma = 2
+    i_16x16_0_2_0 = 9,
+    i_16x16_1_2_0 = 10,
+    i_16x16_2_2_0 = 11,
+    i_16x16_3_2_0 = 12,
+    // cbp_luma = 1, cbp_chroma = 0
+    i_16x16_0_0_1 = 13,
+    i_16x16_1_0_1 = 14,
+    i_16x16_2_0_1 = 15,
+    i_16x16_3_0_1 = 16,
+    // cbp_luma = 1, cbp_chroma = 1
+    i_16x16_0_1_1 = 17,
+    i_16x16_1_1_1 = 18,
+    i_16x16_2_1_1 = 19,
+    i_16x16_3_1_1 = 20,
+    // cbp_luma = 1, cbp_chroma = 2
+    i_16x16_0_2_1 = 21,
+    i_16x16_1_2_1 = 22,
+    i_16x16_2_2_1 = 23,
+    i_16x16_3_2_1 = 24,
+
+    i_pcm = 25,
+
+    pub fn cbpLuma(self: MbTypeI) u1 {
+        const v = @intFromEnum(self);
+        return @intCast((v - 1) / 12);
+    }
+
+    pub fn cbpChroma(self: MbTypeI) u2 {
+        const v = @intFromEnum(self);
+        return @intCast((v - 1) % 12 / 4);
+    }
+
+    pub fn cbpPred(self: MbTypeI) u2 {
+        const v = @intFromEnum(self);
+        return @intCast((v - 1) % 4);
+    }
+};
+
 const coded_block_flag_offset = [_]u16{ 85, 89, 93, 97, 101 };
 
 const levels_base = [_]u16{ 227, 237, 247, 257, 266 };
@@ -283,7 +376,92 @@ pub const CABACSyntax = struct {
         }
     }
 
-    // pub fn decode_residual(mb_type: u16, cbp)
+    // mb_type不应该还包括P/B帧吗
+    pub fn decode_residual(self: *CABACSyntax, mb_type: MbTypeI, cbp: u8, bufs: *ResidualBuffers, nz: *NzCache) !void {
+        const cbps: struct { luma: u8, chroma: u8 } = switch (mb_type) {
+            .i_pcm => unreachable,
+            .i_4x4 => .{ .luma = cbp & 0xF, .chroma = (cbp >> 4) & 3 },
+            else => .{ .luma = mb_type.cbpLuma(), .chroma = mb_type.cbpChroma() },
+        };
+        if (mb_type != .i_4x4) {
+            // .i_16x16
+            try self.decode_residual_block(.luma_dc_intra16, @intFromBool(nz.left_luma_dc > 0), @intFromBool(nz.top_luma_dc > 0), &zigzag_4x4, &bufs.luma_dc, &nz.cur_luma_dc);
+        }
+        //     ┌────┬────┬────┬────┐
+        //     │  0 │  1 │  2 │  3 │     区域0 = {0, 1, 4, 5}   (左上 8x8)
+        //     ├────┼────┼────┼────┤     区域1 = {2, 3, 6, 7}   (右上)
+        //     │  4 │  5 │  6 │  7 │     区域2 = {8, 9, 12, 13} (左下)
+        //     ├────┼────┼────┼────┤     区域3 = {10,11, 14,15} (右下)
+        //     │  8 │  9 │ 10 │ 11 │
+        //     ├────┼────┼────┼────┤
+        //     │ 12 │ 13 │ 14 │ 15 │
+        //     └────┴────┴────┴────┘
+        for (0..4) |i| {
+            const has_residual = if (mb_type == .i_4x4) (cbps.luma >> @as(u3, @intCast(i))) & 1 else cbps.luma;
+            if (has_residual == 0) {
+                for (region_blocks[i]) |n| {
+                    @memset(&bufs.luma[n], 0);
+                    nz.luma[n] = 0;
+                }
+                continue;
+            } else {
+                for (region_blocks[i]) |n| {
+                    const nza = @intFromBool(if (n % 4 != 0) nz.luma[n - 1] > 0 else nz.left_luma[n / 4] > 0);
+                    const nzb = @intFromBool(if (n >= 4) nz.luma[n - 4] > 0 else nz.top_luma[n] > 0);
+                    if (mb_type == .i_4x4) {
+                        try self.decode_residual_block(.luma_4x4, nza, nzb, &zigzag_4x4, &bufs.luma[n], &nz.luma[n]);
+                    } else {
+                        try self.decode_residual_block(.luma_ac_intra16, nza, nzb, zigzag_4x4[1..], &bufs.luma[n], &nz.luma[n]);
+                    }
+                }
+            }
+        }
+        // 第 3 步：色度 DC(cbp_chroma > 0)
+        //
+        // Cb 先、Cr 后，各一次：cat=.chroma_dc,scantable=2x2 光栅表
+        // {0,1,2,3},block=bufs.cb_dc/cr_dc,nza/nzb 查色度 DC 槽，nz_count 记本宏块色度 DC 槽。
+        // cbp_chroma==0 → DC 缓冲清零、槽记 0。
+        //
+        if (cbps.chroma > 0) {
+            try self.decode_residual_block(.chroma_dc, @intFromBool(nz.left_cb_dc > 0), @intFromBool(nz.top_cb_dc > 0), &raster_2x2, &bufs.cb_dc, &nz.cur_cb_dc);
+            try self.decode_residual_block(.chroma_dc, @intFromBool(nz.left_cr_dc > 0), @intFromBool(nz.top_cr_dc > 0), &raster_2x2, &bufs.cr_dc, &nz.cur_cr_dc);
+        } else {
+            @memset(&bufs.cb_dc, 0);
+            @memset(&bufs.cr_dc, 0);
+            nz.cur_cb_dc = 0;
+            nz.cur_cr_dc = 0;
+        }
+        // 第 4 步：色度 AC（仅 cbp_chroma == 2)
+        //
+        if (cbps.chroma == 2) {
+            for (0..4) |b| {
+                const nza = @intFromBool(if (b % 2 == 1) nz.cb[b - 1] > 0 else nz.left_cb[b / 2] > 0);
+                const nzb = @intFromBool(if (b >= 2) nz.cb[b - 2] > 0 else nz.top_cb[b] > 0);
+                try self.decode_residual_block(.chroma_ac, nza, nzb, zigzag_4x4[1..], &bufs.cb[b], &nz.cb[b]);
+            }
+            for (0..4) |r| {
+                const nza = @intFromBool(if (r % 2 == 1) nz.cr[r - 1] > 0 else nz.left_cr[r / 2] > 0);
+                const nzb = @intFromBool(if (r >= 2) nz.cr[r - 2] > 0 else nz.top_cr[r] > 0);
+                try self.decode_residual_block(.chroma_ac, nza, nzb, zigzag_4x4[1..], &bufs.cr[r], &nz.cr[r]);
+            }
+        } else {
+            for (0..4) |b| {
+                @memset(&bufs.cb[b], 0);
+                @memset(&bufs.cr[b], 0);
+            }
+            @memset(&nz.cb, 0);
+            @memset(&nz.cr, 0);
+        }
+        // Cb 的 4 块解完再 Cr 的 4 块：cat=.chroma_ac，带 AC 偏移（scantable+1、block+1)。块
+        // b(0..3,2x2 排列）的邻居：b%2 != 0 → 左 nz.cb[b-1]，否则 nz.left_cb[b/2];b >= 2 → 上
+        // nz.cb[b-2]，否则 nz.top_cb[b%2]。cbp_chroma==1 → AC 缓冲清零、记 0。
+        //
+        // 第 5 步：宏块交接（本函数尾部或调用方）
+        //
+        // 为后续宏块更新账本：亮度右列（块 3,7,11,15)→ 下一宏块的 left_luma；亮度下行（12..15)→
+        // 按列存入跨行的 top 存储；色度右列/下行、DC 块计数同理。I_PCM 宏块所有槽填 16（视为全非
+        // 零）。
+    }
 };
 
 // ---- 测试辅助 ----
@@ -890,4 +1068,227 @@ test "residual_block: chroma_dc (maxNumCoeff=4), 隐式末尾位置" {
     try std.testing.expectEqual(1, block[3]);
     try std.testing.expectEqual(0, block[0]);
     try std.testing.expectEqual(1, engine.context[97].val_mps); // flag 走了 LPS
+}
+
+// ─── decode_residual 测试 ───
+// 该函数本身不读 bin (全部在下层), 测试重点是调度正确性:
+//   skip 分支零消耗 + 清零记账, 区域/块号映射, 邻居账本传递, I_16x16 的 DC 块与 AC 偏移
+fn garbageBufs() ResidualBuffers {
+    var bufs: ResidualBuffers = undefined;
+    @memset(std.mem.asBytes(&bufs), 0x01); // 每字节 0x01 -> i32 格子 = 0x01010101
+    return bufs;
+}
+const GARBAGE_I32: i32 = 0x01010101;
+
+test "residual: I_4x4 cbp=0 -> 全部跳过, 零 bin 消耗" {
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_4x4, 0, &bufs, &nz);
+    for (bufs.luma) |blk| for (blk) |v| {
+        try std.testing.expectEqual(0, v); // skip 分支清干净了
+    };
+    for (nz.luma) |c| try std.testing.expectEqual(0, c); // 账记了 0
+    try std.testing.expectEqual(0, engine.context[93].p_state_idx); // 一个 flag 都没读
+    try std.testing.expectEqual(0, engine.context[105].p_state_idx);
+}
+
+test "residual: I_4x4 cbp=1 -> 只解区域0, 验证邻居账本传递" {
+    // offset=270, 码流全 0 (模拟器验证过的完整轨迹):
+    // 块0: flag(ctx93) LPS -> 1, val_mps 翻转; sig 全 0 -> 隐式 pos15; level=+1
+    // 块1: nza = luma[0]=1 -> ctx94 (!); flag MPS -> 0
+    // 块4: nzb = luma[0]=1 -> ctx95 (!); flag MPS -> 0
+    // 块5: nza=luma[4]=0, nzb=luma[1]=0 -> ctx93, val_mps 已是 1 -> MPS 命中 flag=1
+    //      -> 同样解出 pos15, level=+1
+    // 若邻居查账写错 (比如 nzb 恒查 top_luma[2]), ctx94/95 的触碰记录会对不上
+    const data = [_]u8{0} ** 8;
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 270, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_4x4, 0b0001, &bufs, &nz);
+    // 账本
+    try std.testing.expectEqual(1, nz.luma[0]);
+    try std.testing.expectEqual(0, nz.luma[1]);
+    try std.testing.expectEqual(0, nz.luma[4]);
+    try std.testing.expectEqual(1, nz.luma[5]);
+    try std.testing.expectEqual(0, nz.luma[2]); // 区域1 被跳过
+    // 写回位置: zigzag[15]=15
+    try std.testing.expectEqual(1, bufs.luma[0][15]);
+    try std.testing.expectEqual(1, bufs.luma[5][15]);
+    for (bufs.luma[1]) |v| try std.testing.expectEqual(0, v);
+    // 上下文触碰记录 = 邻居推导的证据
+    try std.testing.expectEqual(1, engine.context[94].p_state_idx); // 块1 看到 nza=1
+    try std.testing.expectEqual(1, engine.context[95].p_state_idx); // 块4 看到 nzb=1
+    try std.testing.expectEqual(1, engine.context[93].val_mps); // 块0 的 flag 走了 LPS
+}
+
+test "residual: I_16x16 cbp_luma=0 -> 只解 DC 块, AC 循环全跳过" {
+    // mb_type = i_16x16_0_0_0 (cbp_luma=0, cbp_chroma=0)
+    // DC 块 flag (ctx85, cat=0): offset=0 -> MPS -> 0 -> DC 块全零
+    // 亮度 AC 循环: cbps.luma=0 -> 4 区域全 skip, 一个 flag 都不读
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_16x16_0_0_0, 0, &bufs, &nz);
+    try std.testing.expectEqual(0, nz.cur_luma_dc);
+    for (bufs.luma_dc) |v| try std.testing.expectEqual(0, v);
+    try std.testing.expectEqual(1, engine.context[85].p_state_idx); // DC flag 读了
+    try std.testing.expectEqual(0, engine.context[89].p_state_idx); // AC flag 一个没读
+}
+
+test "residual: I_16x16 cbp_luma=1 -> 16 个 AC 块全部解, DC 格被清零" {
+    // mb_type 13 = i_16x16_0_0_1 (cbp_luma=1)
+    // offset=0 全程 MPS: DC flag=0; 16 个 AC 块 flag 全 0 (邻居全零 -> 都用 ctx89)
+    // AC 块带 scantable 偏移解 (zigzag[1..]), 块内位置 0 (DC 格) 没有对应扫描位置,
+    // 只被 decode_residual_block 入口的 memset 清零 (DC 值由 luma_dc 块承载)
+    const data = [_]u8{0} ** 8;
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_16x16_0_0_1, 0, &bufs, &nz);
+    try std.testing.expectEqual(16, engine.context[89].p_state_idx); // 恰好 16 个 flag, MPS 爬升
+    try std.testing.expectEqual(0, bufs.luma[3][0]); // DC 格被清零, 不从码流写值
+    try std.testing.expectEqual(0, bufs.luma[3][1]); // AC 区被清零
+    for (nz.luma) |c| try std.testing.expectEqual(0, c);
+}
+
+// ─── decode_residual 色度路径测试 ───
+// cbp 高 4 位: (cbp>>4)&3 = chroma (0=无, 1=仅DC, 2=DC+AC)
+// 色度 DC flag 基址 ctx97 (cat=chroma_dc), AC flag 基址 ctx101 (cat=chroma_ac)
+
+test "residual: chroma=0 -> DC/AC 缓冲与槽位全清零, 零 bin 消耗" {
+    // cbp=0, offset=0: 亮度全跳过, 色度一个 flag 都不读
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_4x4, 0, &bufs, &nz);
+    for (bufs.cb_dc) |v| try std.testing.expectEqual(0, v);
+    for (bufs.cr_dc) |v| try std.testing.expectEqual(0, v);
+    for (bufs.cb) |blk| for (blk) |v| {
+        try std.testing.expectEqual(0, v);
+    };
+    for (bufs.cr) |blk| for (blk) |v| {
+        try std.testing.expectEqual(0, v);
+    };
+    try std.testing.expectEqual(0, nz.cur_cb_dc);
+    try std.testing.expectEqual(0, nz.cur_cr_dc);
+    for (nz.cb) |c| try std.testing.expectEqual(0, c);
+    for (nz.cr) |c| try std.testing.expectEqual(0, c);
+    // 色度 flag 一个都没读
+    try std.testing.expectEqual(0, engine.context[97].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[101].p_state_idx);
+}
+
+test "residual: chroma=1 -> DC flag 读两次, AC 不解只清零" {
+    // cbp=0x10 (chroma=1), offset=0 全程 MPS -> 两个 DC flag 都是 0
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_4x4, 0x10, &bufs, &nz);
+    try std.testing.expectEqual(2, engine.context[97].p_state_idx); // Cb/Cr 各一次, MPS 爬升
+    try std.testing.expectEqual(0, engine.context[101].p_state_idx); // AC flag 一个没读
+    for (bufs.cb_dc) |v| try std.testing.expectEqual(0, v);
+    for (bufs.cb) |blk| for (blk) |v| {
+        try std.testing.expectEqual(0, v); // AC 缓冲被 else 分支清零
+    };
+    try std.testing.expectEqual(0, nz.cur_cb_dc);
+    try std.testing.expectEqual(0, nz.cur_cr_dc);
+}
+
+test "residual: 色度 DC 邻居槽 -> ctxIdxInc (nza 权重 1, nzb 权重 2)" {
+    // cbp=0x10, 预置 left_cb_dc=3 (nza=1), top_cr_dc=1 (nzb=1)
+    // Cb DC flag -> ctx97+1 = 98;  Cr DC flag -> ctx97+2 = 99
+    // offset=0 全程 MPS -> flag=0, 但触碰记录证明邻居推导正确
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    nz.left_cb_dc = 3;
+    nz.top_cr_dc = 1;
+    try syntax.decode_residual(.i_4x4, 0x10, &bufs, &nz);
+    try std.testing.expectEqual(1, engine.context[98].p_state_idx); // Cb 看到左邻 DC 非零
+    try std.testing.expectEqual(1, engine.context[99].p_state_idx); // Cr 看到上邻 DC 非零
+    try std.testing.expectEqual(0, engine.context[97].p_state_idx); // 基址本身没被用
+    try std.testing.expectEqual(0, nz.cur_cb_dc); // flag=0 -> 记 0
+    try std.testing.expectEqual(0, nz.cur_cr_dc);
+}
+
+test "residual: chroma=2 全 MPS -> 8 个 AC flag 全读 (Cb 4 + Cr 4)" {
+    // cbp=0x20, offset=0 全程 MPS: DC flag 2 次 + AC flag 8 次, 全部 flag=0
+    // 若 Cr 的 AC 循环缺失, ctx101 只会爬升到 4, 此测试可抓住
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_4x4, 0x20, &bufs, &nz);
+    try std.testing.expectEqual(2, engine.context[97].p_state_idx); // 2 个 DC flag
+    try std.testing.expectEqual(8, engine.context[101].p_state_idx); // 8 个 AC flag
+    for (bufs.cb) |blk| for (blk) |v| {
+        try std.testing.expectEqual(0, v);
+    };
+    for (bufs.cr) |blk| for (blk) |v| {
+        try std.testing.expectEqual(0, v);
+    };
+}
+
+test "residual: chroma=2 内容路径 (模拟器推演, offset=277 全零码流)" {
+    // 模拟器逐位推演的完整轨迹 (8 字节全零, 恰好消耗 64 bit):
+    //   Cb DC: flag=1 (LPS), sig 全 0 -> 隐式位置 3, level=+1 -> cb_dc[3]=1
+    //   Cr DC: flag=0 -> 全零
+    //   Cb AC: 块0 = {pos1:+2, pos4:-2}, 块1 空, 块2 = {pos8:+1}, 块3 = {pos1:+3, pos3:-1}
+    //   Cr AC: 块0 空, 块1 = {pos1:+3}, 块2 = {pos1:+2, pos3:+1}, 块3 空
+    // 关键点: AC 块写回经 zigzag[1..] 偏移, 位置 0 (DC 格) 恒为 0;
+    // ctx104 被触碰证明 nza=1 且 nzb=1 的组内最大 ctxIdxInc 走到了
+    const data = [_]u8{0} ** 8;
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 277, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    try syntax.decode_residual(.i_4x4, 0x20, &bufs, &nz);
+    // 色度 DC
+    try std.testing.expectEqual([4]i32{ 0, 0, 0, 1 }, bufs.cb_dc);
+    try std.testing.expectEqual([4]i32{ 0, 0, 0, 0 }, bufs.cr_dc);
+    try std.testing.expectEqual(1, nz.cur_cb_dc);
+    try std.testing.expectEqual(0, nz.cur_cr_dc);
+    // 色度 AC 账本
+    try std.testing.expectEqual([4]u8{ 2, 0, 1, 2 }, nz.cb);
+    try std.testing.expectEqual([4]u8{ 0, 1, 2, 0 }, nz.cr);
+    // Cb 块0: 两个系数, DC 格 (位置0) 必须是 0
+    try std.testing.expectEqual(0, bufs.cb[0][0]);
+    try std.testing.expectEqual(2, bufs.cb[0][1]);
+    try std.testing.expectEqual(-2, bufs.cb[0][4]);
+    try std.testing.expectEqual(1, bufs.cb[2][8]);
+    try std.testing.expectEqual(3, bufs.cb[3][1]);
+    try std.testing.expectEqual(-1, bufs.cb[3][3]);
+    // Cr 块 (验证第二个循环确实解了 Cr 而不是复用 Cb)
+    try std.testing.expectEqual(3, bufs.cr[1][1]);
+    try std.testing.expectEqual(2, bufs.cr[2][1]);
+    try std.testing.expectEqual(1, bufs.cr[2][3]);
+    for (bufs.cr[0]) |v| try std.testing.expectEqual(0, v);
+    // 上下文触碰记录: AC flag 基址组 4 个槽位全走到 (nza/nzb 四种组合都出现)
+    try std.testing.expectEqual(1, engine.context[101].p_state_idx);
+    try std.testing.expectEqual(1, engine.context[103].val_mps); // nzb=1 组合走过 (LPS 翻转)
+    try std.testing.expectEqual(1, engine.context[104].p_state_idx); // nza=1,nzb=1 组合走过
+    try std.testing.expectEqual(0, engine.context[98].p_state_idx); // DC 邻居全零, 只用 ctx97
 }
