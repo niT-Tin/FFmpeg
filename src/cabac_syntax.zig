@@ -458,6 +458,30 @@ pub const CABACSyntax = struct {
         //
         // 第 5 步：宏块交接（本函数尾部或调用方）
         //
+        for (0..4) |r| {
+            nz.left_luma[r] = nz.luma[3 + r * 4];
+        }
+        for (0..4) |c| {
+            nz.top_luma[c] = nz.luma[12 + c];
+        }
+        nz.left_cb[0] = nz.cb[1];
+        nz.left_cb[1] = nz.cb[3];
+
+        nz.left_cr[0] = nz.cr[1];
+        nz.left_cr[1] = nz.cr[3];
+
+        nz.top_cb[0] = nz.cb[2];
+        nz.top_cb[1] = nz.cb[3];
+
+        nz.top_cr[0] = nz.cr[2];
+        nz.top_cr[1] = nz.cr[3];
+
+        nz.left_luma_dc = nz.cur_luma_dc;
+        nz.top_luma_dc = nz.cur_luma_dc;
+        nz.left_cb_dc = nz.cur_cb_dc;
+        nz.top_cb_dc = nz.cur_cb_dc;
+        nz.left_cr_dc = nz.cur_cr_dc;
+        nz.top_cr_dc = nz.cur_cr_dc;
         // 为后续宏块更新账本：亮度右列（块 3,7,11,15)→ 下一宏块的 left_luma；亮度下行（12..15)→
         // 按列存入跨行的 top 存储；色度右列/下行、DC 块计数同理。I_PCM 宏块所有槽填 16（视为全非
         // 零）。
@@ -1291,4 +1315,101 @@ test "residual: chroma=2 内容路径 (模拟器推演, offset=277 全零码流)
     try std.testing.expectEqual(1, engine.context[103].val_mps); // nzb=1 组合走过 (LPS 翻转)
     try std.testing.expectEqual(1, engine.context[104].p_state_idx); // nza=1,nzb=1 组合走过
     try std.testing.expectEqual(0, engine.context[98].p_state_idx); // DC 邻居全零, 只用 ctx97
+}
+
+// ─── decode_residual 第 5 步: 宏块交接测试 ───
+// 交接不读 bin, 纯账本搬运。哨兵值 (0xFF) 预填"本宏块不会读到的"邻居槽,
+// 断言交接后被覆写成本宏块的值 —— 既验证搬运方向, 又证明写入确实发生。
+
+test "residual 交接: 亮度右列 -> left_luma, 下行全零 -> top_luma" {
+    // i_4x4, cbp_luma=0b0010 只开区域1 (块 2,3,6,7), offset=191 全零码流 (模拟器推演)
+    // 解出: luma[3]=1, luma[7]=1, 其余全 0
+    // 期望: left_luma = {luma[3], luma[7], luma[11], luma[15]} = {1,1,0,0}
+    //       top_luma  = {luma[12..15]}                       = {0,0,0,0}
+    // 哨兵: 区域1 不读 left_luma (无左边界块), 不读 top_luma[0..1] (块0,1 跳过)
+    const data = [_]u8{0} ** 8;
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 191, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    nz.left_luma = .{ 0xFF, 0xFF, 0xFF, 0xFF };
+    nz.top_luma[0] = 0xFF;
+    nz.top_luma[1] = 0xFF;
+    try syntax.decode_residual(.i_4x4, 0b0010, &bufs, &nz);
+    // 前提: 块 3, 7 确实解出了非零计数
+    try std.testing.expectEqual(1, nz.luma[3]);
+    try std.testing.expectEqual(1, nz.luma[7]);
+    // 右列移交 left (哨兵被覆写)
+    try std.testing.expectEqual([4]u8{ 1, 1, 0, 0 }, nz.left_luma);
+    // 下行全零 -> top 全零 (含哨兵位被覆写成 0)
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, nz.top_luma);
+    // chroma=0: 色度 DC 槽移交的应是 0
+    try std.testing.expectEqual(0, nz.left_cb_dc);
+    try std.testing.expectEqual(0, nz.top_cr_dc);
+}
+
+test "residual 交接: 亮度下行 -> top_luma, 右列全零 -> left_luma" {
+    // i_4x4, cbp_luma=0b0100 只开区域2 (块 8,9,12,13), offset=103 全零码流 (模拟器推演)
+    // 解出: luma[12]=1, luma[13]=1, 其余全 0
+    // 期望: left_luma = {luma[3], luma[7], luma[11], luma[15]} = {0,0,0,0}
+    //       top_luma  = {luma[12..15]}                       = {1,1,0,0}
+    // 哨兵: 区域2 读 left_luma[2..3] (块8,12 在左边界) 保持零,
+    //       只哨兵 left_luma[0..1]; top_luma 完全不读, 全部哨兵
+    const data = [_]u8{0} ** 8;
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 103, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    nz.left_luma[0] = 0xFF;
+    nz.left_luma[1] = 0xFF;
+    nz.top_luma = .{ 0xFF, 0xFF, 0xFF, 0xFF };
+    try syntax.decode_residual(.i_4x4, 0b0100, &bufs, &nz);
+    try std.testing.expectEqual(1, nz.luma[12]);
+    try std.testing.expectEqual(1, nz.luma[13]);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, nz.left_luma);
+    try std.testing.expectEqual([4]u8{ 1, 1, 0, 0 }, nz.top_luma);
+}
+
+test "residual 交接: 色度右列/下行 + 全部 DC 槽 (模拟器推演, offset=286)" {
+    // i_16x16_0_2_0 (cbp_luma=0, cbp_chroma=2), offset=286 全零码流, 消耗 116 bit
+    // 模拟器推演结果 —— 特意挑了计数互不相同的码流, 拿串块必被抓:
+    //   cur_luma_dc=5, cur_cb_dc=0, cur_cr_dc=1   (三个 DC 各不相同)
+    //   cb = {3, 0, 2, 1}   cr = {0, 1, 3, 0}
+    // 期望: left_cb = {cb[1],cb[3]} = {0,1}   top_cb = {cb[2],cb[3]} = {2,1}
+    //       left_cr = {cr[1],cr[3]} = {1,0}   top_cr = {cr[2],cr[3]} = {3,0}
+    //       left_luma_dc = top_luma_dc = 5, left_cb_dc = top_cb_dc = 0,
+    //       left_cr_dc = top_cr_dc = 1
+    // cbp_luma=0 -> 亮度块全零 -> left/top_luma 全 0 (哨兵预填证明覆写)
+    const data = [_]u8{0} ** 16;
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 286, &br);
+    var syntax = CABACSyntax.init(&engine);
+    var bufs = garbageBufs();
+    var nz: NzCache = std.mem.zeroes(NzCache);
+    nz.left_luma = .{ 0xFF, 0xFF, 0xFF, 0xFF }; // cbp_luma=0, 解码过程不读
+    nz.top_luma = .{ 0xFF, 0xFF, 0xFF, 0xFF };
+    try syntax.decode_residual(.i_16x16_0_2_0, 0, &bufs, &nz);
+    // 前提: 模拟器推演的计数确实复现
+    try std.testing.expectEqual([4]u8{ 3, 0, 2, 1 }, nz.cb);
+    try std.testing.expectEqual([4]u8{ 0, 1, 3, 0 }, nz.cr);
+    try std.testing.expectEqual(5, nz.cur_luma_dc);
+    try std.testing.expectEqual(0, nz.cur_cb_dc);
+    try std.testing.expectEqual(1, nz.cur_cr_dc);
+    // 色度交接
+    try std.testing.expectEqual([2]u8{ 0, 1 }, nz.left_cb);
+    try std.testing.expectEqual([2]u8{ 2, 1 }, nz.top_cb);
+    try std.testing.expectEqual([2]u8{ 1, 0 }, nz.left_cr);
+    try std.testing.expectEqual([2]u8{ 3, 0 }, nz.top_cr);
+    // DC 交接 (一个值喂 left 和 top 两个槽)
+    try std.testing.expectEqual(5, nz.left_luma_dc);
+    try std.testing.expectEqual(5, nz.top_luma_dc);
+    try std.testing.expectEqual(0, nz.left_cb_dc);
+    try std.testing.expectEqual(0, nz.top_cb_dc);
+    try std.testing.expectEqual(1, nz.left_cr_dc);
+    try std.testing.expectEqual(1, nz.top_cr_dc);
+    // 亮度全零, 哨兵被覆写
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, nz.left_luma);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, nz.top_luma);
 }
