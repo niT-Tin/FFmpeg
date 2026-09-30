@@ -206,7 +206,7 @@ pub const CABACSyntax = struct {
     }
 
     pub fn decode_I_16x16_intra_chrom_premod(self: *CABACSyntax, cond_term_a: u16, cond_term_b: u16) !u32 {
-        const ctx_0 = 64 + cond_term_a + cond_term_b;
+        const ctx_0 = 64 + cond_term_a + 2 * cond_term_b;
         if (try self.engine.decode_decision(ctx_0) == 0) return 0; // DC
         if (try self.engine.decode_decision(67) == 0) return 1; // Horizontal
         if (try self.engine.decode_decision(67) == 0) return 2; // Vertical

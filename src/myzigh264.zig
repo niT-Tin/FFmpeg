@@ -9,6 +9,7 @@ const slice_mod = @import("slice.zig");
 const NALUnit = @import("types.zig").NALUnit;
 const CABACEngine = @import("cabac.zig").CABACEngine;
 const CABACSyntax = @import("cabac_syntax.zig").CABACSyntax;
+const SliceDecoder = @import("macroblock.zig").SliceDecoder;
 
 const FFmpeg = @import("ffmpeg");
 
@@ -37,15 +38,16 @@ fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
     return allocator.realloc(dst, di);
 }
 
-fn decode_slice_data(data: []u8, reader: *BitReader) !void {
-    // var codIRange = 510;
-    // var codIOffset = try reader.next_bits(9);
-    _ = data;
-    _ = reader;
-    // const result: []u8 = "";
-    // 先这么直接返回
-    // return result;
-}
+// 这个后续删除，功能移动到macroblock.zig里面的SliceDecoder
+// fn decode_slice_data(data: []u8, reader: *BitReader) !void {
+//     // var codIRange = 510;
+//     // var codIOffset = try reader.next_bits(9);
+//     _ = data;
+//     _ = reader;
+//     // const result: []u8 = "";
+//     // 先这么直接返回
+//     // return result;
+// }
 
 fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
     var splitter = NALSplitter.init(allocator, h.raw_nal_buffer.items);
@@ -89,21 +91,24 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
                 if (!is_i) break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
 
                 const pps = h.pps_list[slice_header.pic_parameter_set_id].?;
+                const sps = h.sps_list[pps.seq_parameter_set_id].?;
                 const slice_qp_y = pps.pic_init_qp_minus26 + 26 + slice_header.slice_qp_delta;
                 // 初始化算术解码引擎
                 var engine = try CABACEngine.init(slice_header.slice_type, slice_header.cabac_init_idc, slice_qp_y, &bit_reader);
                 var syntax = CABACSyntax.init(&engine);
-                // 初始化上下文变量表
-                if (slice_header.first_mb_in_slice == 0) {
-                    // 输出上一帧AVFrame
-                    if (nal.nal_type == .H264_NAL_IDR_SLICE) {
-                        //TODO: IDR帧: 清空所有参考帧
-                    }
-                    // 按照新SPS重新分配帧缓存
-                    // begin_new_picture
-                }
-                std.debug.print("Slice_header: {any}\n", .{slice_header});
-                try decode_slice_data(rbsp_data, &bit_reader); // 非 IDR 图像的编码条带
+                var dec = try SliceDecoder.init(aa, &syntax, &sps, &pps, slice_qp_y);
+                try dec.decode_slice_data(slice_header.first_mb_in_slice);
+                // // 初始化上下文变量表
+                // if (slice_header.first_mb_in_slice == 0) {
+                //     // 输出上一帧AVFrame
+                //     if (nal.nal_type == .H264_NAL_IDR_SLICE) {
+                //         //TODO: IDR帧: 清空所有参考帧
+                //     }
+                //     // 按照新SPS重新分配帧缓存
+                //     // begin_new_picture
+                // }
+                // std.debug.print("Slice_header: {any}\n", .{slice_header});
+                // try decode_slice_data(rbsp_data, &bit_reader); // 非 IDR 图像的编码条带
                 break :naltype "H264_NAL_SLICE,H264_NAL_IDR_SLICE";
             },
             else => @tagName(nal.nal_type),
