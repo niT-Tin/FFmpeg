@@ -91,8 +91,10 @@ pub const PPS = struct {
         pps.constrained_intra_pred_flag = try pps_bit_reader.next_bit() != 0;
         pps.redundant_pic_cnt_present_flag = try pps_bit_reader.next_bit() != 0;
 
-        // High profile 扩展: 仅当 RBSP 还有剩余数据时存在 (baseline 的 PPS 到此结束)
-        if (pps_bit_reader.byte_pos < pps_bit_reader.buf.len) {
+        // High profile 扩展: 仅当 RBSP 还有剩余数据时存在 (baseline/main 的 PPS 到此结束)
+        // 判定用规范的 more_rbsp_data(): 剩余位不全是 rbsp_trailing_bits 才算有扩展,
+        // 不能只看剩余字节数 (末尾字节里可能只是 stop bit + 对齐零位)
+        if (pps_bit_reader.more_rbsp_data()) {
             pps.transform_8x8_mode_flag = try pps_bit_reader.next_bit() != 0;
             pps.pic_scaling_matrix_present_flag = try pps_bit_reader.next_bit() != 0;
             if (pps.pic_scaling_matrix_present_flag) {

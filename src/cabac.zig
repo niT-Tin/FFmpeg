@@ -1184,7 +1184,9 @@ pub const CABACEngine = struct {
 
         // 更新上下文概率
         if (bin == ctx.val_mps) { // mps, mps的概率更大, 也就是概率阶梯更高
-            ctx.p_state_idx = @min(ctx.p_state_idx +| 1, 63);
+            // transIdxMPS: 0..61 爬升, 62 饱和 (63 只能由 LPS 转移到达);
+            // 若误爬到 63, range_tab_lps[63]={2,2,2,2} 会让概率严重失真
+            ctx.p_state_idx = if (ctx.p_state_idx < 62) ctx.p_state_idx + 1 else ctx.p_state_idx;
         } else { // lps, lps概率更大
             if (ctx.p_state_idx == 0) { // 阶梯为0,最不确定
                 ctx.val_mps = 1 - ctx.val_mps; // 反转mps符号
@@ -1384,6 +1386,17 @@ test "init: I slice 上下文按 qp 初始化 (Table 9-12 第 0 项)" {
     try std.testing.expectEqual(0, engine.code_I_offset);
     try std.testing.expectEqual(46, engine.context[0].p_state_idx);
     try std.testing.expectEqual(0, engine.context[0].val_mps);
+}
+
+test "init: preCtxState > 63 时 p_state_idx = pre - 64, val_mps = 1 (Table 9-12 第 2 项)" {
+    // cabac_context_init_I[2] = {m=3, n=74}, slice_qp_y=26
+    // pre = ((3*26)>>4) + 74 = 4 + 74 = 78 > 63 -> p_state_idx = 78-64 = 14, val_mps = 1
+    // (规范 9.3.1.1.1: 减 64 不是 63; 减错会让所有 valMPS=1 上下文概率阶梯偏高一级)
+    const data = [2]u8{ 0, 0 };
+    var br = BitReader.init(&data);
+    const engine = try CABACEngine.init(2, 0, 26, &br);
+    try std.testing.expectEqual(14, engine.context[2].p_state_idx);
+    try std.testing.expectEqual(1, engine.context[2].val_mps);
 }
 
 

@@ -3,6 +3,32 @@ const ZigH264Context = @import("context.zig").ZigH264Context;
 const NALUnit = @import("types.zig").NALUnit;
 const NALError = @import("types.zig").NALError;
 
+// 去除 emulation_prevention_three_byte (0x000003 -> 0x0000), 返回 RBSP
+pub fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
+    var di: usize = 0;
+    var si: usize = 0;
+    var dst = try allocator.alloc(u8, src.len);
+
+    while (si + 2 < src.len) {
+        if (src[si] == 0 and src[si + 1] == 0 and src[si + 2] == 3) {
+            dst[di] = 0;
+            dst[di + 1] = 0;
+            di += 2;
+            si += 3;
+        } else {
+            dst[di] = src[si];
+            di += 1;
+            si += 1;
+        }
+    }
+    while (si < src.len) {
+        dst[di] = src[si];
+        di += 1;
+        si += 1;
+    }
+    return allocator.realloc(dst, di);
+}
+
 pub const NALSplitter = struct {
     allocator: std.mem.Allocator,
     data: []u8,

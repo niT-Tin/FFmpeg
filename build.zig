@@ -52,4 +52,32 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(lib);
 
+    // 端到端验证工具: zig build 后 zig-out/bin/h264-check <annexb.h264>
+    const check_exe = b.addExecutable(.{
+        .name = "h264-check",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("src/decode_file.zig"),
+        }),
+    });
+    b.installArtifact(check_exe);
+
+    // 单元测试: zig build test (各模块独立编译, 不依赖 ffmpeg 头文件)
+    const test_step = b.step("test", "Run unit tests");
+    for ([_][]const u8{
+        "src/cabac.zig",
+        "src/cabac_syntax.zig",
+        "src/macroblock.zig",
+    }) |path| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .root_source_file = b.path(path),
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
 }
