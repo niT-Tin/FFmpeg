@@ -68,7 +68,7 @@ pub const ResidualBuffers = struct {
     cr: [4][16]i32, // 色度AC块
 };
 
-const region_blocks = [4][4]u8{ .{ 0, 1, 4, 5 }, .{ 2, 3, 6, 7 }, .{ 8, 9, 12, 13 }, .{ 10, 11, 14, 15 } };
+const region_blocks = [4][4]u8{ .{ 0, 1, 2, 3 }, .{ 4, 5, 6, 7 }, .{ 8, 9, 10, 11 }, .{ 12, 13, 14, 15 } };
 
 pub const NzCache = struct {
     // 本宏块 16 个 4x4 亮度块的非零计数, 按块光栅编号 0..15
@@ -154,6 +154,30 @@ pub const MbTypeI = enum(u8) {
 
 const coded_block_flag_offset = [_]u16{ 85, 89, 93, 97, 101 };
 
+// H.264 luma4x4BlkIdx 布局 (8x8 区域优先, 不是纯光栅!):
+//   0  1  4  5      索引 n 的位置: x = (n%2) + 2*((n/4)%2)
+//   2  3  6  7                     y = ((n%4)/2) + 2*(n/8)
+//   8  9  12 13
+//   10 11 14 15
+// 索引 n 的左邻居: x 为奇 -> n-1; x 为偶(x>0) -> n-3; x==0 -> 左邻宏块的 (3,y)
+// 索引 n 的上邻居: y 为奇 -> n-2; y 为偶(y>0) -> n-6; y==0 -> 上邻宏块的 (x,3)
+inline fn luma4x4X(n: usize) usize {
+    return (n % 2) + 2 * ((n / 4) % 2);
+}
+inline fn luma4x4Y(n: usize) usize {
+    return ((n % 4) / 2) + 2 * (n / 8);
+}
+
+// significant_coeff_flag / last_significant_coeff_flag 的 ctxIdxOffset (按 cat,
+// 对齐 FFmpeg significant_coeff_flag_offset / last_coeff_flag_offset 的 frame 行):
+//   cat0 luma_dc_intra16: 105/166 (15 槽, 位置 0..14)
+//   cat1 luma_ac_intra16: 120/181 (14 槽, 位置 0..13)
+//   cat2 luma_4x4:        134/195 (15 槽)
+//   cat3 chroma_dc:       149/210 ( 3 槽, 位置 0..2)
+//   cat4 chroma_ac:       152/213 (14 槽)
+const significant_coeff_flag_offset = [_]u16{ 105, 120, 134, 149, 152 };
+const last_coeff_flag_offset = [_]u16{ 166, 181, 195, 210, 213 };
+
 const levels_base = [_]u16{ 227, 237, 247, 257, 266 };
 const levels_ctx = [_]u8{ 1, 2, 3, 4, 0, 0, 0, 0 };
 const levels_gt1_ctx = [_]u8{ 5, 5, 5, 5, 6, 7, 8, 9 };
@@ -171,24 +195,28 @@ pub const CABACSyntax = struct {
     }
     // I slice 的 mb_type 解码 (规范 Table 9-32 / 9-34, 值含义见 Table 7-11)
     // 解码树 (对齐 FFmpeg decode_cabac_intra_mb_type):
-    //   bin0 (ctxIdx 3): 0 -> I_4x4 (mb_type 0)
+    //   bin0: ctxIdx = 3 + condTermA + condTermB
+    //     (condTerm: 左/上宏块可用且其 mb_type 是 I_16x16/I_PCM, 两者权重均为 1)
+    //     0 -> I_4x4 (mb_type 0)
     //   bin1: 走 decode_terminate (该 bin 的 ctxIdx = 276), 命中 -> I_PCM (mb_type 25)
-    //   否则 I_16x16 家族, mb_type = 1 + 12*cbp_luma + 4*cbp_chroma + pred
+    //   否则 I_16x16 家族, 依次读: cbp_luma (ctxIdx 6), cbp_chroma (ctxIdx 7/8),
+    //   intra16x16_pred_mode (ctxIdx 9/10)
+    //   mb_type = 1 + 12*cbp_luma + 4*cbp_chroma + pred
     //   对应 Table 7-11 命名 I_16x16_{pred}_{chroma}_{luma}
-    pub fn decode_mb_type_I(self: *CABACSyntax) !u32 {
-        const bin0 = try self.engine.decode_decision(3);
+    pub fn decode_mb_type_I(self: *CABACSyntax, cond_term_a: u1, cond_term_b: u1) !u32 {
+        const bin0 = try self.engine.decode_decision(3 + @as(u16, cond_term_a) + @as(u16, cond_term_b));
         if (bin0 == 0) return 0; // I_4x4
 
         if (try self.engine.decode_terminate() == 1) return 25; // I_PCM
         // 注意: 返回 25 后调用方需做 pcm_alignment_zero_bit 字节对齐 + 裸 PCM 数据, 不走 CABAC
 
         var mb_type: u32 = 1; // I_16x16
-        mb_type += 12 * @as(u32, try self.engine.decode_decision(4)); // cbp_luma != 0
-        if (try self.engine.decode_decision(5) == 1) { // cbp_chroma != 0
-            mb_type += 4 + 4 * @as(u32, try self.engine.decode_decision(5)); // 10 -> +4, 11 -> +8
+        mb_type += 12 * @as(u32, try self.engine.decode_decision(6)); // cbp_luma != 0
+        if (try self.engine.decode_decision(7) == 1) { // cbp_chroma != 0
+            mb_type += 4 + 4 * @as(u32, try self.engine.decode_decision(8)); // 10 -> +4, 11 -> +8
         }
-        mb_type += 2 * @as(u32, try self.engine.decode_decision(6)); // intra16x16_pred_mode 高位
-        mb_type += 1 * @as(u32, try self.engine.decode_decision(6)); // intra16x16_pred_mode 低位
+        mb_type += 2 * @as(u32, try self.engine.decode_decision(9)); // intra16x16_pred_mode 高位
+        mb_type += 1 * @as(u32, try self.engine.decode_decision(10)); // intra16x16_pred_mode 低位
         return mb_type;
     }
 
@@ -205,8 +233,11 @@ pub const CABACSyntax = struct {
         return rem + (if (rem >= most_probable_mode) @as(u32, 1) else @as(u32, 0));
     }
 
+    // ctxIdxInc = condTermA + condTermB (两个 condTerm 权重均为 1, 见 FFmpeg
+    // decode_cabac_mb_chroma_pre_mode: 两次 ctx++; 若误用 A + 2*B, condTerm=3 时
+    // 会与 bin1/bin2 的 ctx67 冲突)
     pub fn decode_I_16x16_intra_chrom_premod(self: *CABACSyntax, cond_term_a: u16, cond_term_b: u16) !u32 {
-        const ctx_0 = 64 + cond_term_a + 2 * cond_term_b;
+        const ctx_0 = 64 + cond_term_a + cond_term_b;
         if (try self.engine.decode_decision(ctx_0) == 0) return 0; // DC
         if (try self.engine.decode_decision(67) == 0) return 1; // Horizontal
         if (try self.engine.decode_decision(67) == 0) return 2; // Vertical
@@ -296,15 +327,18 @@ pub const CABACSyntax = struct {
     }
 
     // 正向扫描，残差块非0系数index
-    pub fn decode_significance(self: *CABACSyntax, max_coeff: u8) !CoeffList {
+    // ctxIdx = 对应 cat 的基址 + 扫描位置 (105/166 只是 cat0 的基址, 不是所有块的)
+    pub fn decode_significance(self: *CABACSyntax, cat: BlockType, max_coeff: u8) !CoeffList {
+        const sig_base = significant_coeff_flag_offset[@intFromEnum(cat)];
+        const last_base = last_coeff_flag_offset[@intFromEnum(cat)];
         var result_coeff_list: CoeffList = .{};
         var encounter_last: bool = false;
         for (0..max_coeff - 1) |i| {
             const pos: u8 = @intCast(i);
-            if (try self.engine.decode_decision(105 + @as(u16, pos)) == 1) {
+            if (try self.engine.decode_decision(sig_base + @as(u16, pos)) == 1) {
                 result_coeff_list.index[result_coeff_list.count] = pos;
                 result_coeff_list.count += 1;
-                if (try self.engine.decode_decision(166 + @as(u16, pos)) == 1) {
+                if (try self.engine.decode_decision(last_base + @as(u16, pos)) == 1) {
                     encounter_last = true;
                     break; // 最后一个非0系数
                 }
@@ -366,7 +400,7 @@ pub const CABACSyntax = struct {
             return;
         } else {
             // coded_block_flag == 1的情况，block系数存在不为0的情况
-            var list = try self.decode_significance(max_num_coeff);
+            var list = try self.decode_significance(cat, max_num_coeff);
             std.debug.assert(list.count >= 1);
             try self.decode_coef_levels(@intFromEnum(cat), &list);
             for (0..list.count) |k| {
@@ -388,13 +422,13 @@ pub const CABACSyntax = struct {
             try self.decode_residual_block(.luma_dc_intra16, @intFromBool(nz.left_luma_dc > 0), @intFromBool(nz.top_luma_dc > 0), &zigzag_4x4, &bufs.luma_dc, &nz.cur_luma_dc);
         }
         //     ┌────┬────┬────┬────┐
-        //     │  0 │  1 │  2 │  3 │     区域0 = {0, 1, 4, 5}   (左上 8x8)
-        //     ├────┼────┼────┼────┤     区域1 = {2, 3, 6, 7}   (右上)
-        //     │  4 │  5 │  6 │  7 │     区域2 = {8, 9, 12, 13} (左下)
-        //     ├────┼────┼────┼────┤     区域3 = {10,11, 14,15} (右下)
-        //     │  8 │  9 │ 10 │ 11 │
+        //     │  0 │  1 │  4 │  5 │     8x8 区域0 = {0,1,2,3}     (左上)
+        //     ├────┼────┼────┼────┤     8x8 区域1 = {4,5,6,7}     (右上)
+        //     │  2 │  3 │  6 │  7 │     8x8 区域2 = {8,9,10,11}   (左下)
+        //     ├────┼────┼────┼────┤     8x8 区域3 = {12,13,14,15} (右下)
+        //     │  8 │  9 │ 12 │ 13 │     cbp luma bit i 对应区域 i
         //     ├────┼────┼────┼────┤
-        //     │ 12 │ 13 │ 14 │ 15 │
+        //     │ 10 │ 11 │ 14 │ 15 │
         //     └────┴────┴────┴────┘
         for (0..4) |i| {
             const has_residual = if (mb_type == .i_4x4) (cbps.luma >> @as(u3, @intCast(i))) & 1 else cbps.luma;
@@ -406,8 +440,10 @@ pub const CABACSyntax = struct {
                 continue;
             } else {
                 for (region_blocks[i]) |n| {
-                    const nza = @intFromBool(if (n % 4 != 0) nz.luma[n - 1] > 0 else nz.left_luma[n / 4] > 0);
-                    const nzb = @intFromBool(if (n >= 4) nz.luma[n - 4] > 0 else nz.top_luma[n] > 0);
+                    const x = luma4x4X(n);
+                    const y = luma4x4Y(n);
+                    const nza = @intFromBool(if (x != 0) nz.luma[if (x % 2 == 1) n - 1 else n - 3] > 0 else nz.left_luma[y] > 0);
+                    const nzb = @intFromBool(if (y != 0) nz.luma[if (y % 2 == 1) n - 2 else n - 6] > 0 else nz.top_luma[x] > 0);
                     if (mb_type == .i_4x4) {
                         try self.decode_residual_block(.luma_4x4, nza, nzb, &zigzag_4x4, &bufs.luma[n], &nz.luma[n]);
                     } else {
@@ -457,12 +493,15 @@ pub const CABACSyntax = struct {
         // nz.cb[b-2]，否则 nz.top_cb[b%2]。cbp_chroma==1 → AC 缓冲清零、记 0。
         //
         // 第 5 步：宏块交接（本函数尾部或调用方）
-        //
+        // 右列 (3,y) = 块 {5,7,13,15} -> 下一宏块的 left_luma[y];
+        // 下行 (x,3) = 块 {10,11,14,15} -> 按列存入跨行的 top_luma[x]
+        const right_col = [4]u8{ 5, 7, 13, 15 };
+        const bottom_row = [4]u8{ 10, 11, 14, 15 };
         for (0..4) |r| {
-            nz.left_luma[r] = nz.luma[3 + r * 4];
+            nz.left_luma[r] = nz.luma[right_col[r]];
         }
         for (0..4) |c| {
-            nz.top_luma[c] = nz.luma[12 + c];
+            nz.top_luma[c] = nz.luma[bottom_row[c]];
         }
         nz.left_cb[0] = nz.cb[1];
         nz.left_cb[1] = nz.cb[3];
@@ -511,7 +550,28 @@ test "decode_mb_type_I: bin0=0 -> I_4x4 (mb_type 0)" {
     var br = BitReader.init(&data);
     var engine = testEngine(510, 100, &br);
     var syntax = CABACSyntax.init(&engine);
-    try std.testing.expectEqual(0, try syntax.decode_mb_type_I());
+    try std.testing.expectEqual(0, try syntax.decode_mb_type_I(0, 0));
+}
+
+test "decode_mb_type_I: bin0 的 ctxIdxInc = condA + condB (邻居是否 I_16x16/I_PCM)" {
+    // offset=100 全程 MPS -> bin0=0 -> I_4x4; 用 "哪个 ctx 被碰" 验证邻居权重
+    // cond(0,0)->ctx3, cond(1,0)->ctx4, cond(0,1)->ctx4, cond(1,1)->ctx5 (两者权重均为 1)
+    const cases = [_]struct { a: u1, b: u1, ctx: u16 }{
+        .{ .a = 0, .b = 0, .ctx = 3 },
+        .{ .a = 1, .b = 0, .ctx = 4 },
+        .{ .a = 0, .b = 1, .ctx = 4 },
+        .{ .a = 1, .b = 1, .ctx = 5 },
+    };
+    for (cases) |case| {
+        const data = [1]u8{0};
+        var br = BitReader.init(&data);
+        var engine = testEngine(510, 100, &br);
+        var syntax = CABACSyntax.init(&engine);
+        try std.testing.expectEqual(0, try syntax.decode_mb_type_I(case.a, case.b));
+        try std.testing.expectEqual(1, engine.context[case.ctx].p_state_idx);
+        if (case.ctx != 3) try std.testing.expectEqual(0, engine.context[3].p_state_idx);
+        if (case.ctx != 5) try std.testing.expectEqual(0, engine.context[5].p_state_idx);
+    }
 }
 
 test "decode_mb_type_I: bin0=1 后 terminate 命中 -> I_PCM (mb_type 25)" {
@@ -522,39 +582,69 @@ test "decode_mb_type_I: bin0=1 后 terminate 命中 -> I_PCM (mb_type 25)" {
     var br = BitReader.init(&data);
     var engine = testEngine(510, 510, &br);
     var syntax = CABACSyntax.init(&engine);
-    try std.testing.expectEqual(25, try syntax.decode_mb_type_I());
+    try std.testing.expectEqual(25, try syntax.decode_mb_type_I(0, 0));
 }
 
-test "decode_mb_type_I: I_16x16 全零 -> mb_type 1" {
-    // offset=280, 码流全 0; ctx3..6 全部 p=0, val_mps=0
+test "decode_mb_type_I: I_16x16 全零 -> mb_type 1, 树内 ctx 为 6/7/9/10" {
+    // offset=280, 码流全 0; 所有 ctx 初始 p=0, val_mps=0
     // bin0 (ctx3): 280>=270 -> LPS -> 1; offset=10, range=240 -> renorm -> 480, offset=20
     // terminate: 478; 20<478 -> 0 (不 renorm)
-    // cbp_luma (ctx4, mps=240): 20<240 -> 0;  -> renorm -> offset=40
-    // cbp_chroma (ctx5, mps=240): 40<240 -> 0; -> renorm -> offset=80
-    // pred_hi (ctx6, mps=240): 80<240 -> 0;   -> renorm -> offset=160
-    // pred_lo (ctx6 p=1, mps=253): 160<253 -> 0
+    // cbp_luma (ctx6, mps=240): 20<240 -> 0;  -> renorm -> offset=40
+    // cbp_chroma (ctx7, mps=240): 40<240 -> 0; -> renorm -> offset=80
+    // pred_hi (ctx9, mps=240): 80<240 -> 0;   -> renorm -> offset=160
+    // pred_lo (ctx10 p=1, mps=253): 160<253 -> 0
     // mb_type = 1
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 280, &br);
     var syntax = CABACSyntax.init(&engine);
-    try std.testing.expectEqual(1, try syntax.decode_mb_type_I());
+    try std.testing.expectEqual(1, try syntax.decode_mb_type_I(0, 0));
+    try std.testing.expectEqual(1, engine.context[6].p_state_idx); // cbp_luma
+    try std.testing.expectEqual(1, engine.context[7].p_state_idx); // cbp_chroma bin0
+    try std.testing.expectEqual(0, engine.context[8].p_state_idx); // chroma bin0=0 -> bin1 不读
+    try std.testing.expectEqual(1, engine.context[9].p_state_idx); // pred 高位
+    try std.testing.expectEqual(1, engine.context[10].p_state_idx); // pred 低位
+    // ctx4/5 只属于 bin0 的邻居变体, 树内不得误用
+    try std.testing.expectEqual(0, engine.context[4].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[5].p_state_idx);
 }
 
 test "decode_mb_type_I: cbp_luma=1 -> mb_type 13" {
     // offset=400, 码流全 0
     // bin0 (ctx3): 400>=270 -> LPS -> 1; offset=130, range=240 -> renorm -> 480, offset=260
     // terminate: 478; 260<478 -> 0
-    // cbp_luma (ctx4, mps=240): 260>=240 -> LPS -> 1; offset=20, -> renorm -> offset=40
-    // cbp_chroma (ctx5): 40<240 -> 0; -> renorm -> offset=80
-    // pred_hi (ctx6): 80<240 -> 0;  -> renorm -> offset=160
-    // pred_lo (ctx6 p=1, mps=253): 160<253 -> 0
+    // cbp_luma (ctx6, mps=240): 260>=240 -> LPS -> 1; val_mps 翻转; offset=20 -> renorm -> offset=40
+    // cbp_chroma (ctx7): 40<240 -> 0; -> renorm -> offset=80
+    // pred_hi (ctx9): 80<240 -> 0;  -> renorm -> offset=160
+    // pred_lo (ctx10 p=1, mps=253): 160<253 -> 0
     // mb_type = 1 + 12 = 13
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 400, &br);
     var syntax = CABACSyntax.init(&engine);
-    try std.testing.expectEqual(13, try syntax.decode_mb_type_I());
+    try std.testing.expectEqual(13, try syntax.decode_mb_type_I(0, 0));
+    try std.testing.expectEqual(1, engine.context[6].val_mps); // cbp_luma 走了 LPS
+    try std.testing.expectEqual(0, engine.context[4].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[5].p_state_idx);
+}
+
+test "decode_mb_type_I: cbp_chroma bin1 走 ctx8 -> mb_type 5" {
+    // 预置 ctx3.val_mps=1 (bin0=1) 与 ctx7.val_mps=1 (chroma bin0=1), offset=0 全程 MPS:
+    // bin0=1 -> terminate=0 -> cbp_luma(ctx6)=0 -> chroma bin0(ctx7)=1
+    //   -> chroma bin1(ctx8)=0 -> +4 -> pred(ctx9/10)=0 -> mb_type = 1 + 4 = 5
+    // 若 chroma bin1 误用 ctx7, 会读出 1 -> +8 -> mb_type 9, 此测试可抓住
+    const data = [1]u8{0};
+    var br = BitReader.init(&data);
+    var engine = testEngine(510, 0, &br);
+    engine.context[3].val_mps = 1;
+    engine.context[7].val_mps = 1;
+    var syntax = CABACSyntax.init(&engine);
+    try std.testing.expectEqual(5, try syntax.decode_mb_type_I(0, 0));
+    try std.testing.expectEqual(1, engine.context[8].p_state_idx); // chroma bin1 落在 ctx8
+    try std.testing.expectEqual(1, engine.context[9].p_state_idx); // pred 高位
+    try std.testing.expectEqual(1, engine.context[10].p_state_idx); // pred 低位
+    try std.testing.expectEqual(0, engine.context[4].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[5].p_state_idx);
 }
 
 test "decode_I_4x4_intra_premod: flag=1 -> 直接返回 most_probable_mode" {
@@ -864,10 +954,11 @@ test "decode_coded_block_flag: LPS 路径返回 1 且 val_mps 翻转" {
 // 上下文全部初始化为 p_state_idx=0, val_mps=0 (range=510, q=3, lps=240, mps=270):
 //   offset < 270 -> MPS -> bin=0, range=270 不 renorm, offset 不变, p_state_idx 0->1
 //   offset >= 270 -> LPS -> bin=1, val_mps 翻转 0->1, offset=2*(offset-270)+码流bit
-// significance map 的 ctxIdx: significant=105+i, last=166+i (块内每个槽位最多碰一次),
-// 因此用 "哪些槽位被碰过" 可以精确断言扫描路径。
+// significance map 的 ctxIdx: significant=sig_base(cat)+i, last=last_base(cat)+i
+//   (块内每个槽位最多碰一次), 因此用 "哪些槽位被碰过" 可以精确断言扫描路径。
+// luma_4x4 (cat2): sig=134, last=195;  chroma_dc (cat3): sig=149, last=210
 
-test "decode_significance: 全部 significant=0 -> 隐式末尾位置 (max_coeff=16)" {
+test "decode_significance: 全部 significant=0 -> 隐式末尾位置 (luma_4x4, max_coeff=16)" {
     // offset=0: 任何 mps 区间都满足 0 < mps -> 全程 MPS -> sig 全 0;
     // renorm 时 off = (0<<n)|0 恒为 0, 不会漂移
     // i=0..14 全 0, 循环正常跑完 -> 位置 15 隐式非零: index=[15], count=1
@@ -875,69 +966,69 @@ test "decode_significance: 全部 significant=0 -> 隐式末尾位置 (max_coeff
     var br = BitReader.init(&data);
     var engine = testEngine(510, 0, &br);
     var syntax = CABACSyntax.init(&engine);
-    const list = try syntax.decode_significance(16);
+    const list = try syntax.decode_significance(.luma_4x4, 16);
     try std.testing.expectEqual(1, list.count);
     try std.testing.expectEqual(15, list.index[0]);
-    try std.testing.expectEqual(1, engine.context[105].p_state_idx); // i=0 被扫到
-    try std.testing.expectEqual(1, engine.context[119].p_state_idx); // i=14 被扫到
-    try std.testing.expectEqual(0, engine.context[120].p_state_idx); // i=15 不在循环内
-    // significant=0 时不得读 last flag: 166..180 全部未被触碰
-    try std.testing.expectEqual(0, engine.context[166].p_state_idx);
-    try std.testing.expectEqual(0, engine.context[166].val_mps);
-    try std.testing.expectEqual(0, engine.context[180].p_state_idx);
+    try std.testing.expectEqual(1, engine.context[134].p_state_idx); // i=0 被扫到
+    try std.testing.expectEqual(1, engine.context[148].p_state_idx); // i=14 被扫到
+    try std.testing.expectEqual(0, engine.context[149].p_state_idx); // i=15 不在循环内
+    // significant=0 时不得读 last flag: 195..209 全部未被触碰
+    try std.testing.expectEqual(0, engine.context[195].p_state_idx);
+    try std.testing.expectEqual(0, engine.context[195].val_mps);
+    try std.testing.expectEqual(0, engine.context[209].p_state_idx);
 }
 
 test "decode_significance: significant=1 且 last=1 -> 立即 break" {
-    // offset=509: ctx105: 509>=270(mps) -> LPS -> sig=1, val_mps 翻转为 1
+    // offset=509: ctx134: 509>=270(mps) -> LPS -> sig=1, val_mps 翻转为 1
     //   offset=509-270=239, range=lps=240 -> renorm n=1 -> range=480, offset=478|0=478
-    // ctx166: q=(480>>6)&3=3, lps=240, mps=480-240=240; 478>=240 -> LPS -> last=1 -> break
+    // ctx195: q=(480>>6)&3=3, lps=240, mps=480-240=240; 478>=240 -> LPS -> last=1 -> break
     // -> index=[0], count=1
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 509, &br);
     var syntax = CABACSyntax.init(&engine);
-    const list = try syntax.decode_significance(16);
+    const list = try syntax.decode_significance(.luma_4x4, 16);
     try std.testing.expectEqual(1, list.count);
     try std.testing.expectEqual(0, list.index[0]);
-    try std.testing.expectEqual(1, engine.context[105].val_mps); // LPS 翻转, 证明进了 significant 分支
-    try std.testing.expectEqual(1, engine.context[166].val_mps); // last flag 被读取
-    try std.testing.expectEqual(0, engine.context[106].p_state_idx); // i=1 未执行: break 生效
-    try std.testing.expectEqual(0, engine.context[106].val_mps);
+    try std.testing.expectEqual(1, engine.context[134].val_mps); // LPS 翻转, 证明进了 significant 分支
+    try std.testing.expectEqual(1, engine.context[195].val_mps); // last flag 被读取
+    try std.testing.expectEqual(0, engine.context[135].p_state_idx); // i=1 未执行: break 生效
+    try std.testing.expectEqual(0, engine.context[135].val_mps);
 }
 
 test "decode_significance: significant=1, last=0, 后续全 0 -> index=[0,15]" {
-    // offset=270: ctx105: q=3, lps=240, mps=270; 270>=270 -> LPS -> sig=1
-    //   offset=270-270=0, range=240 -> renorm n=1 -> 480, offset=(0<<1)|0=0; val_mps(105) 翻转为 1
-    // ctx166: q=(480>>6)&3=3, lps=240, mps=240; 0<240 -> MPS -> last=0, p(166) 0->1
+    // offset=270: ctx134: q=3, lps=240, mps=270; 270>=270 -> LPS -> sig=1
+    //   offset=270-270=0, range=240 -> renorm n=1 -> 480, offset=(0<<1)|0=0; val_mps(134) 翻转为 1
+    // ctx195: q=(480>>6)&3=3, lps=240, mps=240; 0<240 -> MPS -> last=0, p(195) 0->1
     //   range=240 -> renorm -> 480, offset 仍 0
-    // i=1..14 (ctx106..119): offset=0 恒 MPS -> sig 全 0
+    // i=1..14 (ctx135..148): offset=0 恒 MPS -> sig 全 0
     // 循环跑完无 last -> 隐式末尾: index=[0,15], count=2
     const data = [4]u8{ 0, 0, 0, 0 };
     var br = BitReader.init(&data);
     var engine = testEngine(510, 270, &br);
     var syntax = CABACSyntax.init(&engine);
-    const list = try syntax.decode_significance(16);
+    const list = try syntax.decode_significance(.luma_4x4, 16);
     try std.testing.expectEqual(2, list.count);
     try std.testing.expectEqual(0, list.index[0]);
     try std.testing.expectEqual(15, list.index[1]);
-    try std.testing.expectEqual(1, engine.context[105].val_mps);
-    try std.testing.expectEqual(1, engine.context[166].p_state_idx); // last flag 被读了 (MPS 爬升)
-    try std.testing.expectEqual(0, engine.context[166].val_mps);
-    try std.testing.expectEqual(0, engine.context[167].p_state_idx); // i=1 的 last flag 不应被读
+    try std.testing.expectEqual(1, engine.context[134].val_mps);
+    try std.testing.expectEqual(1, engine.context[195].p_state_idx); // last flag 被读了 (MPS 爬升)
+    try std.testing.expectEqual(0, engine.context[195].val_mps);
+    try std.testing.expectEqual(0, engine.context[196].p_state_idx); // i=1 的 last flag 不应被读
 }
 
 test "decode_significance: max_coeff=4 (chroma_dc) 循环边界恰好覆盖 i=0..2" {
     // offset=20 全程 MPS=0 -> 隐式位置 3
-    // 若循环边界误写成 0..max_coeff-2, i=2 (ctx107) 不会被扫到, 此测试可抓住
+    // 若循环边界误写成 0..max_coeff-2, i=2 (ctx151) 不会被扫到, 此测试可抓住
     const data = [1]u8{0};
     var br = BitReader.init(&data);
     var engine = testEngine(510, 20, &br);
     var syntax = CABACSyntax.init(&engine);
-    const list = try syntax.decode_significance(4);
+    const list = try syntax.decode_significance(.chroma_dc, 4);
     try std.testing.expectEqual(1, list.count);
     try std.testing.expectEqual(3, list.index[0]);
-    try std.testing.expectEqual(1, engine.context[107].p_state_idx); // i=2 被扫到
-    try std.testing.expectEqual(0, engine.context[108].p_state_idx); // i=3 不在循环内
+    try std.testing.expectEqual(1, engine.context[151].p_state_idx); // i=2 被扫到
+    try std.testing.expectEqual(0, engine.context[152].p_state_idx); // i=3 不在循环内
 }
 
 // ─── decode_coef_levels 测试 ───
@@ -1121,11 +1212,11 @@ test "residual: I_4x4 cbp=0 -> 全部跳过, 零 bin 消耗" {
 }
 
 test "residual: I_4x4 cbp=1 -> 只解区域0, 验证邻居账本传递" {
-    // offset=270, 码流全 0 (模拟器验证过的完整轨迹):
-    // 块0: flag(ctx93) LPS -> 1, val_mps 翻转; sig 全 0 -> 隐式 pos15; level=+1
-    // 块1: nza = luma[0]=1 -> ctx94 (!); flag MPS -> 0
-    // 块4: nzb = luma[0]=1 -> ctx95 (!); flag MPS -> 0
-    // 块5: nza=luma[4]=0, nzb=luma[1]=0 -> ctx93, val_mps 已是 1 -> MPS 命中 flag=1
+    // offset=270, 码流全 0 (模拟器验证过的完整轨迹)。区域0 = 块 {0,1,2,3} (8x8 区域优先):
+    // 块0: (0,0) 邻居不可用 -> flag(ctx93) LPS -> 1, val_mps 翻转; sig 全 0 -> 隐式 pos15; level=+1
+    // 块1: (1,0) nza=luma[0]=1 -> ctx94; flag MPS -> 0
+    // 块2: (0,1) nzb=luma[0]=1 -> ctx95; flag MPS -> 0
+    // 块3: (1,1) nza=luma[2]=0, nzb=luma[1]=0 -> ctx93, val_mps 已是 1 -> MPS 命中 flag=1
     //      -> 同样解出 pos15, level=+1
     // 若邻居查账写错 (比如 nzb 恒查 top_luma[2]), ctx94/95 的触碰记录会对不上
     const data = [_]u8{0} ** 8;
@@ -1138,17 +1229,21 @@ test "residual: I_4x4 cbp=1 -> 只解区域0, 验证邻居账本传递" {
     // 账本
     try std.testing.expectEqual(1, nz.luma[0]);
     try std.testing.expectEqual(0, nz.luma[1]);
-    try std.testing.expectEqual(0, nz.luma[4]);
-    try std.testing.expectEqual(1, nz.luma[5]);
-    try std.testing.expectEqual(0, nz.luma[2]); // 区域1 被跳过
+    try std.testing.expectEqual(0, nz.luma[2]);
+    try std.testing.expectEqual(1, nz.luma[3]);
+    try std.testing.expectEqual(0, nz.luma[4]); // 区域1 被跳过
     // 写回位置: zigzag[15]=15
     try std.testing.expectEqual(1, bufs.luma[0][15]);
-    try std.testing.expectEqual(1, bufs.luma[5][15]);
+    try std.testing.expectEqual(1, bufs.luma[3][15]);
     for (bufs.luma[1]) |v| try std.testing.expectEqual(0, v);
     // 上下文触碰记录 = 邻居推导的证据
     try std.testing.expectEqual(1, engine.context[94].p_state_idx); // 块1 看到 nza=1
-    try std.testing.expectEqual(1, engine.context[95].p_state_idx); // 块4 看到 nzb=1
+    try std.testing.expectEqual(1, engine.context[95].p_state_idx); // 块2 看到 nzb=1
     try std.testing.expectEqual(1, engine.context[93].val_mps); // 块0 的 flag 走了 LPS
+    try std.testing.expectEqual(1, engine.context[93].p_state_idx); // 块3 在翻转后的 ctx93 上 MPS 爬升
+    try std.testing.expectEqual(2, engine.context[134].p_state_idx); // 两个块都读了 sig i=0 (cat2 基址)
+    try std.testing.expectEqual(2, engine.context[148].p_state_idx); // 扫描到 i=14
+    try std.testing.expectEqual(2, engine.context[248].p_state_idx); // levels bin0 (247+1)
 }
 
 test "residual: I_16x16 cbp_luma=0 -> 只解 DC 块, AC 循环全跳过" {
@@ -1276,14 +1371,14 @@ test "residual: chroma=2 全 MPS -> 8 个 AC flag 全读 (Cb 4 + Cr 4)" {
 }
 
 test "residual: chroma=2 内容路径 (模拟器推演, offset=277 全零码流)" {
-    // 模拟器逐位推演的完整轨迹 (8 字节全零, 恰好消耗 64 bit):
+    // 数值为修复区域/邻居映射后重新推演的回归钉值:
     //   Cb DC: flag=1 (LPS), sig 全 0 -> 隐式位置 3, level=+1 -> cb_dc[3]=1
     //   Cr DC: flag=0 -> 全零
-    //   Cb AC: 块0 = {pos1:+2, pos4:-2}, 块1 空, 块2 = {pos8:+1}, 块3 = {pos1:+3, pos3:-1}
-    //   Cr AC: 块0 空, 块1 = {pos1:+3}, 块2 = {pos1:+2, pos3:+1}, 块3 空
+    //   Cb AC: 块0 = {pos1:-4, pos4:-2}, 块1 = {pos1:-1}, 块2 空, 块3 = {pos5:-2}
+    //   Cr AC: 块0 空, 块1 = {pos1:15, pos2:1, pos5:3}, 块2 = {pos1:15, pos2:1, pos5:2}, 块3 空
     // 关键点: AC 块写回经 zigzag[1..] 偏移, 位置 0 (DC 格) 恒为 0;
     // ctx104 被触碰证明 nza=1 且 nzb=1 的组内最大 ctxIdxInc 走到了
-    const data = [_]u8{0} ** 8;
+    const data = [_]u8{0} ** 32;
     var br = BitReader.init(&data);
     var engine = testEngine(510, 277, &br);
     var syntax = CABACSyntax.init(&engine);
@@ -1296,23 +1391,24 @@ test "residual: chroma=2 内容路径 (模拟器推演, offset=277 全零码流)
     try std.testing.expectEqual(1, nz.cur_cb_dc);
     try std.testing.expectEqual(0, nz.cur_cr_dc);
     // 色度 AC 账本
-    try std.testing.expectEqual([4]u8{ 2, 0, 1, 2 }, nz.cb);
-    try std.testing.expectEqual([4]u8{ 0, 1, 2, 0 }, nz.cr);
+    try std.testing.expectEqual([4]u8{ 2, 1, 0, 1 }, nz.cb);
+    try std.testing.expectEqual([4]u8{ 0, 3, 3, 0 }, nz.cr);
     // Cb 块0: 两个系数, DC 格 (位置0) 必须是 0
     try std.testing.expectEqual(0, bufs.cb[0][0]);
-    try std.testing.expectEqual(2, bufs.cb[0][1]);
+    try std.testing.expectEqual(-4, bufs.cb[0][1]);
     try std.testing.expectEqual(-2, bufs.cb[0][4]);
-    try std.testing.expectEqual(1, bufs.cb[2][8]);
-    try std.testing.expectEqual(3, bufs.cb[3][1]);
-    try std.testing.expectEqual(-1, bufs.cb[3][3]);
+    try std.testing.expectEqual(-1, bufs.cb[1][1]);
+    try std.testing.expectEqual(-2, bufs.cb[3][5]);
     // Cr 块 (验证第二个循环确实解了 Cr 而不是复用 Cb)
-    try std.testing.expectEqual(3, bufs.cr[1][1]);
-    try std.testing.expectEqual(2, bufs.cr[2][1]);
-    try std.testing.expectEqual(1, bufs.cr[2][3]);
+    try std.testing.expectEqual(15, bufs.cr[1][1]);
+    try std.testing.expectEqual(1, bufs.cr[1][2]);
+    try std.testing.expectEqual(3, bufs.cr[1][5]);
+    try std.testing.expectEqual(15, bufs.cr[2][1]);
+    try std.testing.expectEqual(1, bufs.cr[2][2]);
+    try std.testing.expectEqual(2, bufs.cr[2][5]);
     for (bufs.cr[0]) |v| try std.testing.expectEqual(0, v);
-    // 上下文触碰记录: AC flag 基址组 4 个槽位全走到 (nza/nzb 四种组合都出现)
+    // 上下文触碰记录: AC flag 组内四种 nza/nzb 组合都出现
     try std.testing.expectEqual(1, engine.context[101].p_state_idx);
-    try std.testing.expectEqual(1, engine.context[103].val_mps); // nzb=1 组合走过 (LPS 翻转)
     try std.testing.expectEqual(1, engine.context[104].p_state_idx); // nza=1,nzb=1 组合走过
     try std.testing.expectEqual(0, engine.context[98].p_state_idx); // DC 邻居全零, 只用 ctx97
 }
@@ -1322,11 +1418,11 @@ test "residual: chroma=2 内容路径 (模拟器推演, offset=277 全零码流)
 // 断言交接后被覆写成本宏块的值 —— 既验证搬运方向, 又证明写入确实发生。
 
 test "residual 交接: 亮度右列 -> left_luma, 下行全零 -> top_luma" {
-    // i_4x4, cbp_luma=0b0010 只开区域1 (块 2,3,6,7), offset=191 全零码流 (模拟器推演)
-    // 解出: luma[3]=1, luma[7]=1, 其余全 0
-    // 期望: left_luma = {luma[3], luma[7], luma[11], luma[15]} = {1,1,0,0}
-    //       top_luma  = {luma[12..15]}                       = {0,0,0,0}
-    // 哨兵: 区域1 不读 left_luma (无左边界块), 不读 top_luma[0..1] (块0,1 跳过)
+    // i_4x4, cbp_luma=0b0010 只开区域1 (块 4,5,6,7), offset=191 全零码流 (模拟器推演)
+    // 解出: luma[5]=1, luma[7]=1, 其余全 0
+    // 期望: left_luma = {luma[5], luma[7], luma[13], luma[15]} = {1,1,0,0}
+    //       top_luma  = {luma[10], luma[11], luma[14], luma[15]} = {0,0,0,0}
+    // 哨兵: 区域1 不读 left_luma (无左边界块), 不读 top_luma[0..1] (区域0 跳过)
     const data = [_]u8{0} ** 8;
     var br = BitReader.init(&data);
     var engine = testEngine(510, 191, &br);
@@ -1337,8 +1433,8 @@ test "residual 交接: 亮度右列 -> left_luma, 下行全零 -> top_luma" {
     nz.top_luma[0] = 0xFF;
     nz.top_luma[1] = 0xFF;
     try syntax.decode_residual(.i_4x4, 0b0010, &bufs, &nz);
-    // 前提: 块 3, 7 确实解出了非零计数
-    try std.testing.expectEqual(1, nz.luma[3]);
+    // 前提: 块 5, 7 确实解出了非零计数
+    try std.testing.expectEqual(1, nz.luma[5]);
     try std.testing.expectEqual(1, nz.luma[7]);
     // 右列移交 left (哨兵被覆写)
     try std.testing.expectEqual([4]u8{ 1, 1, 0, 0 }, nz.left_luma);
@@ -1350,11 +1446,11 @@ test "residual 交接: 亮度右列 -> left_luma, 下行全零 -> top_luma" {
 }
 
 test "residual 交接: 亮度下行 -> top_luma, 右列全零 -> left_luma" {
-    // i_4x4, cbp_luma=0b0100 只开区域2 (块 8,9,12,13), offset=103 全零码流 (模拟器推演)
-    // 解出: luma[12]=1, luma[13]=1, 其余全 0
-    // 期望: left_luma = {luma[3], luma[7], luma[11], luma[15]} = {0,0,0,0}
-    //       top_luma  = {luma[12..15]}                       = {1,1,0,0}
-    // 哨兵: 区域2 读 left_luma[2..3] (块8,12 在左边界) 保持零,
+    // i_4x4, cbp_luma=0b0100 只开区域2 (块 8,9,10,11), offset=103 全零码流 (模拟器推演)
+    // 解出: luma[10]=1, luma[11]=1, 其余全 0
+    // 期望: left_luma = {luma[5], luma[7], luma[13], luma[15]}   = {0,0,0,0}
+    //       top_luma  = {luma[10], luma[11], luma[14], luma[15]} = {1,1,0,0}
+    // 哨兵: 区域2 读 left_luma[2..3] (块8,10 在左边界) 保持零,
     //       只哨兵 left_luma[0..1]; top_luma 完全不读, 全部哨兵
     const data = [_]u8{0} ** 8;
     var br = BitReader.init(&data);
@@ -1366,19 +1462,19 @@ test "residual 交接: 亮度下行 -> top_luma, 右列全零 -> left_luma" {
     nz.left_luma[1] = 0xFF;
     nz.top_luma = .{ 0xFF, 0xFF, 0xFF, 0xFF };
     try syntax.decode_residual(.i_4x4, 0b0100, &bufs, &nz);
-    try std.testing.expectEqual(1, nz.luma[12]);
-    try std.testing.expectEqual(1, nz.luma[13]);
+    try std.testing.expectEqual(1, nz.luma[10]);
+    try std.testing.expectEqual(1, nz.luma[11]);
     try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, nz.left_luma);
     try std.testing.expectEqual([4]u8{ 1, 1, 0, 0 }, nz.top_luma);
 }
 
 test "residual 交接: 色度右列/下行 + 全部 DC 槽 (模拟器推演, offset=286)" {
-    // i_16x16_0_2_0 (cbp_luma=0, cbp_chroma=2), offset=286 全零码流, 消耗 116 bit
-    // 模拟器推演结果 —— 特意挑了计数互不相同的码流, 拿串块必被抓:
+    // i_16x16_0_2_0 (cbp_luma=0, cbp_chroma=2), offset=286 全零码流
+    // 数值为修复区域/邻居映射后重新推演的回归钉值:
     //   cur_luma_dc=5, cur_cb_dc=0, cur_cr_dc=1   (三个 DC 各不相同)
-    //   cb = {3, 0, 2, 1}   cr = {0, 1, 3, 0}
-    // 期望: left_cb = {cb[1],cb[3]} = {0,1}   top_cb = {cb[2],cb[3]} = {2,1}
-    //       left_cr = {cr[1],cr[3]} = {1,0}   top_cr = {cr[2],cr[3]} = {3,0}
+    //   cb = {2, 0, 1, 0}   cr = {0, 0, 1, 0}
+    // 期望: left_cb = {cb[1],cb[3]} = {0,0}   top_cb = {cb[2],cb[3]} = {1,0}
+    //       left_cr = {cr[1],cr[3]} = {0,0}   top_cr = {cr[2],cr[3]} = {1,0}
     //       left_luma_dc = top_luma_dc = 5, left_cb_dc = top_cb_dc = 0,
     //       left_cr_dc = top_cr_dc = 1
     // cbp_luma=0 -> 亮度块全零 -> left/top_luma 全 0 (哨兵预填证明覆写)
@@ -1392,16 +1488,16 @@ test "residual 交接: 色度右列/下行 + 全部 DC 槽 (模拟器推演, off
     nz.top_luma = .{ 0xFF, 0xFF, 0xFF, 0xFF };
     try syntax.decode_residual(.i_16x16_0_2_0, 0, &bufs, &nz);
     // 前提: 模拟器推演的计数确实复现
-    try std.testing.expectEqual([4]u8{ 3, 0, 2, 1 }, nz.cb);
-    try std.testing.expectEqual([4]u8{ 0, 1, 3, 0 }, nz.cr);
+    try std.testing.expectEqual([4]u8{ 2, 0, 1, 0 }, nz.cb);
+    try std.testing.expectEqual([4]u8{ 0, 0, 1, 0 }, nz.cr);
     try std.testing.expectEqual(5, nz.cur_luma_dc);
     try std.testing.expectEqual(0, nz.cur_cb_dc);
     try std.testing.expectEqual(1, nz.cur_cr_dc);
     // 色度交接
-    try std.testing.expectEqual([2]u8{ 0, 1 }, nz.left_cb);
-    try std.testing.expectEqual([2]u8{ 2, 1 }, nz.top_cb);
-    try std.testing.expectEqual([2]u8{ 1, 0 }, nz.left_cr);
-    try std.testing.expectEqual([2]u8{ 3, 0 }, nz.top_cr);
+    try std.testing.expectEqual([2]u8{ 0, 0 }, nz.left_cb);
+    try std.testing.expectEqual([2]u8{ 1, 0 }, nz.top_cb);
+    try std.testing.expectEqual([2]u8{ 0, 0 }, nz.left_cr);
+    try std.testing.expectEqual([2]u8{ 1, 0 }, nz.top_cr);
     // DC 交接 (一个值喂 left 和 top 两个槽)
     try std.testing.expectEqual(5, nz.left_luma_dc);
     try std.testing.expectEqual(5, nz.top_luma_dc);

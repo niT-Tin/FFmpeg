@@ -48,6 +48,37 @@ pub const BitReader = struct {
         }
         return result;
     }
+
+    /// 字节对齐: 丢弃当前字节剩余的填充 bit (slice header 后 CABAC 数据前的
+    /// cabac_alignment_one_bit, 以及 rbsp_trailing_bits 的对齐零位)
+    pub fn align_byte(self: *BitReader) void {
+        if (self.bit_pos != 0) {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+    }
+
+    /// 规范 7.2 more_rbsp_data(): 剩余 bit 是否不全是 rbsp_trailing_bits
+    /// (即剩余位不是 "全 0" 也不是 "一个 1 后跟全 0" 的 stop bit + 对齐模式)
+    pub fn more_rbsp_data(self: *const BitReader) bool {
+        var byte_pos = self.byte_pos;
+        var mask: u8 = @as(u8, 0x80) >> self.bit_pos;
+        // 找到剩余的第一个 1 bit; 它之后若还有任意 1 bit, 说明它不是 stop bit
+        var first_one_seen = false;
+        while (byte_pos < self.buf.len) : ({
+            byte_pos += 1;
+            mask = 0x80;
+        }) {
+            const byte = self.buf[byte_pos];
+            while (mask != 0) : (mask >>= 1) {
+                if ((byte & mask) != 0) {
+                    if (first_one_seen) return true;
+                    first_one_seen = true;
+                }
+            }
+        }
+        return false;
+    }
 };
 
 test "next_bit reads individual bits MSB first" {

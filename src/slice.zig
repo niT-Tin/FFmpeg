@@ -32,6 +32,7 @@ fn skip_ref_pic_list_modification(br: *BitReader, is_b: bool) !void {
 
 fn skip_dec_ref_pic_marking(br: *BitReader, nal_type: NALType) !void {
     if (nal_type == .H264_NAL_IDR_SLICE) {
+        _ = try br.next_bit(); // no_output_of_prior_pics_flag
         _ = try br.next_bit(); // long_term_reference_flag, 只是标记位，无后续字段
     } else {
         const mmco_flag = try br.next_bit();
@@ -62,7 +63,7 @@ pub const StateContext = struct {
                 .val_mps = 0,
             };
         } else {
-            return .{ .p_state_idx = @intCast(pre - 63), .val_mps = 1 };
+            return .{ .p_state_idx = @intCast(pre - 64), .val_mps = 1 };
         }
     }
 };
@@ -116,26 +117,21 @@ pub const SliceHeader = struct {
         const is_si = (sh.slice_type % 5) == 4;
         const is_b = (sh.slice_type % 5) == 1;
 
-        // 2. IDR only: idr_pic_id
-        if (nal_type == .H264_NAL_IDR_SLICE) {
-            sh.idr_pic_id = try expGolomb.read_ue(br);
-        }
-
-        // 3. frame_num
+        // 2. frame_num (规范顺序: frame_num 在 idr_pic_id 之前)
         sh.frame_num = try br.next_bits(sps.log2_max_frame_num_minus4 + 4);
 
-        // 4. field_pic_flag / bottom_field_flag
+        // 3. field_pic_flag / bottom_field_flag
         if (!sps.frame_mbs_only_flag) {
             const field_pic_flag = try br.next_bit();
             if (field_pic_flag != 0) _ = try br.next_bit();
         }
 
-        // 5. IDR only: no_output_of_prior_pics_flag
+        // 4. IDR only: idr_pic_id (在 frame_num / field 标志之后)
         if (nal_type == .H264_NAL_IDR_SLICE) {
-            _ = try br.next_bit();
+            sh.idr_pic_id = try expGolomb.read_ue(br);
         }
 
-        // 6. POC
+        // 5. POC
         if (sps.pic_order_cnt_type == 0) {
             sh.pic_order_cnt_lsb = try br.next_bits(sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
             if (pps.pic_order_present_flag and !sps.frame_mbs_only_flag) {

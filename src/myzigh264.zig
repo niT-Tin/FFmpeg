@@ -12,31 +12,7 @@ const CABACSyntax = @import("cabac_syntax.zig").CABACSyntax;
 const SliceDecoder = @import("macroblock.zig").SliceDecoder;
 
 const FFmpeg = @import("ffmpeg");
-
-fn remove_emulation_prevention(allocator: std.mem.Allocator, src: []u8) ![]u8 {
-    var di: usize = 0;
-    var si: usize = 0;
-    var dst = try allocator.alloc(u8, src.len);
-
-    while (si + 2 < src.len) {
-        if (src[si] == 0 and src[si + 1] == 0 and src[si + 2] == 3) {
-            dst[di] = 0;
-            dst[di + 1] = 0;
-            di += 2;
-            si += 3;
-        } else {
-            dst[di] = src[si];
-            di += 1;
-            si += 1;
-        }
-    }
-    while (si < src.len) {
-        dst[di] = src[si];
-        di += 1;
-        si += 1;
-    }
-    return allocator.realloc(dst, di);
-}
+const remove_emulation_prevention = @import("nal_splitter.zig").remove_emulation_prevention;
 
 // 这个后续删除，功能移动到macroblock.zig里面的SliceDecoder
 // fn decode_slice_data(data: []u8, reader: *BitReader) !void {
@@ -93,6 +69,8 @@ fn split_nals(allocator: std.mem.Allocator, h: *ZigH264Context) !void {
                 const pps = h.pps_list[slice_header.pic_parameter_set_id].?;
                 const sps = h.sps_list[pps.seq_parameter_set_id].?;
                 const slice_qp_y = pps.pic_init_qp_minus26 + 26 + slice_header.slice_qp_delta;
+                // CABAC 数据从下一字节边界开始 (cabac_alignment_one_bit)
+                bit_reader.align_byte();
                 // 初始化算术解码引擎
                 var engine = try CABACEngine.init(slice_header.slice_type, slice_header.cabac_init_idc, slice_qp_y, &bit_reader);
                 var syntax = CABACSyntax.init(&engine);
