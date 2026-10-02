@@ -16,6 +16,7 @@ const CABACSyntax = @import("cabac_syntax.zig").CABACSyntax;
 const SliceDecoder = @import("macroblock.zig").SliceDecoder;
 const MbTypeI = @import("cabac_syntax.zig").MbTypeI;
 const remove_emulation_prevention = @import("nal_splitter.zig").remove_emulation_prevention;
+const expGolomb = @import("exp_golomb.zig");
 
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -44,7 +45,28 @@ pub fn main(init: std.process.Init) !void {
         .read_pos = 0,
     };
 
+    // ---- 预扫: 收集所有 VCL slice 的 first_mb_in_slice ----
+    // 一帧多条 slice 时, 每条 slice 的结束位置 = 下一条 slice 的 first_mb - 1,
+    // 最后一条 slice 停在整帧末尾。first_mb_in_slice 是 slice header 的第一个
+    // 语法元素 (ue(v)), 不需要 SPS/PPS 就能取到, 所以这趟很便宜。
+    var all_first_mbs = try std.ArrayList(u32).initCapacity(aa, 16);
+    {
+        var pre_splitter = NALSplitter.init(aa, data);
+        while (try pre_splitter.next(&h)) |nal| {
+            switch (nal.nal_type) {
+                .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
+                    const rbsp = try remove_emulation_prevention(aa, nal.data[1..]);
+                    var br = BitReader.init(rbsp);
+                    try all_first_mbs.append(aa, try expGolomb.read_ue(&br));
+                },
+                else => {},
+            }
+        }
+        h.read_pos = 0; // NALSplitter 用 h.read_pos 作游标, 复位后主循环从头扫
+    }
+
     var splitter = NALSplitter.init(aa, data);
+    var vcl_idx: usize = 0;
     var i_slice_idx: usize = 0;
     var ok_slices: usize = 0;
     var bad_slices: usize = 0;
@@ -76,6 +98,8 @@ pub fn main(init: std.process.Init) !void {
                 });
             },
             .H264_NAL_SLICE, .H264_NAL_IDR_SLICE => {
+                const this_vcl = vcl_idx;
+                vcl_idx += 1;
                 if (i_slice_idx >= max_slices) break;
                 const rbsp = try remove_emulation_prevention(aa, nal.data[1..]);
                 var br = BitReader.init(rbsp);
@@ -113,14 +137,25 @@ pub fn main(init: std.process.Init) !void {
                     qp_min = @min(qp_min, mb.qp_y);
                     qp_max = @max(qp_max, mb.qp_y);
                 }
-                const sync_ok = dec.last_end_of_slice_flag == 1 and
-                    (dec.mb_y * dec.width_in_mbs + dec.mb_x == total - 1);
-                std.debug.print("I slice {d} ({s}): first_mb={d} decoded={d}/{d} terminate={d} I4x4={d} I16x16={d} qp=[{d},{d}] -> {s}\n", .{
+                const stopped_mb = dec.mb_y * dec.width_in_mbs + dec.mb_x;
+                // 本条 slice 该在哪儿结束: 同帧的下一条 slice 之前, 否则整帧末尾。
+                // next_first <= 当前 first_mb 说明下一条属于新的一帧 (first_mb 归零)。
+                const expected_end: u32 = blk: {
+                    if (this_vcl + 1 < all_first_mbs.items.len) {
+                        const next_first = all_first_mbs.items[this_vcl + 1];
+                        if (next_first > sh.first_mb_in_slice) break :blk next_first - 1;
+                    }
+                    break :blk total - 1;
+                };
+                const sync_ok = dec.last_end_of_slice_flag == 1 and stopped_mb == expected_end;
+                std.debug.print("I slice {d} ({s}): first_mb={d} decoded={d}/{d} end={d} stopped={d} terminate={d} I4x4={d} I16x16={d} qp=[{d},{d}] -> {s}\n", .{
                     i_slice_idx,
                     if (nal.nal_type == .H264_NAL_IDR_SLICE) "IDR" else "I",
                     sh.first_mb_in_slice,
                     decoded,
                     total,
+                    expected_end,
+                    stopped_mb,
                     dec.last_end_of_slice_flag,
                     n_i4,
                     n_i16,

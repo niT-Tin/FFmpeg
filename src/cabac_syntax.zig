@@ -249,7 +249,9 @@ pub const CABACSyntax = struct {
         var val: i32 = 0;
         while (try self.engine.decode_decision(ctx) == 1) {
             val += 1;
-            ctx = 62;
+            // bin0: ctx 60/61, bin1: ctx 62, bin2 起: ctx 63
+            // (对齐 FFmpeg libavcodec/h264_cabac.c: `int ctx = 2; ... ctx = 3;`)
+            ctx = if (val == 1) 62 else 63;
             if (val > 2 * 51) return DecodeError.DecodeMBQPDeltaError;
         }
         var delta: i32 = 0;
