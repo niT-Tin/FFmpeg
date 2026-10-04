@@ -740,16 +740,21 @@ test "decode_mb_qp_delta: bin串 10 -> +1" {
     try std.testing.expectEqual(1, try syntax.decode_mb_qp_delta(0));
 }
 
-test "decode_mb_qp_delta: bin串 110 -> -1" {
-    // offset=509, 码流 0b1100_0000
-    // bin0 (ctx60): 509>=270 -> LPS -> 1; offset=239, range=240 -> renorm -> 480, offset=479
-    // bin1 (ctx62): 479>=240 -> LPS -> 1; val_mps->1; offset=239, range=240 -> renorm -> 480, offset=479
-    // bin2 (ctx62 val_mps=1): 479>=240 -> LPS -> 1-1=0 -> 停止, val=2 -> -(2+1)/2 = -1
+test "decode_mb_qp_delta: bin串 110 -> -1 (bin2 必须落在 ctx63)" {
+    // offset=390, 码流 0b1100_0000; 三个 bin 依次落在 ctx60 / ctx62 / ctx63
+    //   (对齐 FFmpeg libavcodec/h264_cabac.c: `int ctx = 2; ... ctx = 3;`)
+    // bin0 (ctx60, p=0): 390>=270 -> LPS -> 1, p 停在 0
+    // bin1 (ctx62, p=0): 仍是 p=0 -> LPS -> 1, p 停在 0
+    // bin2 (ctx63, p=0): MPS -> 0 -> 停止, val=2 -> -(2+1)/2 = -1
+    // 回归保护: bin2 用 ctx63; 若退回 ctx62 (此时已被 bin1 改成 p=1), 这条码流会解出别的值
     const data = [1]u8{0b1100_0000};
     var br = BitReader.init(&data);
-    var engine = testEngine(510, 509, &br);
+    var engine = testEngine(510, 390, &br);
     var syntax = CABACSyntax.init(&engine);
     try std.testing.expectEqual(-1, try syntax.decode_mb_qp_delta(0));
+    try std.testing.expectEqual(0, engine.context[60].p_state_idx); // bin0 走 LPS, 状态停在 0
+    try std.testing.expectEqual(0, engine.context[62].p_state_idx); // bin1 走 LPS
+    try std.testing.expect(engine.context[63].p_state_idx != 0); // bin2 落在 ctx63 (落 ctx62 是 bug)
 }
 
 test "decode_mb_qp_delta: prev != 0 时首 bin 用 ctx 61" {
