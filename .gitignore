@@ -66,4 +66,4 @@ test.h264
 H.264文档.pdf
 .pi_session
 zig-learning-projects.md
-tests/
+tests/vectors/
